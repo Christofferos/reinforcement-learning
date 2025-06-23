@@ -21,3 +21,17 @@ I share my mistakes and what I have learnt from them listed here: `mistakes_lear
 
 Algorithms supported by Stable-Baselines3:
 https://stable-baselines3.readthedocs.io/en/master/guide/algos.html
+
+## Mistakes and lessons learnt
+
+#1.
+Using Tensorflow was a game changer for monitoring algorithmic performance. I can compare algorithms and can see when they fizzle out in improvement.
+
+#2.
+I had forgotten to turn on friction on the ground when training the HumanoidDrunkWalk agent. And I wondered why it just kept falling for 1-2 days hahah. Until I notice during evaluation that it never gets friction on its feet. But it pushed me to research more and lead me to Tensorflow and other online learning resources.
+
+#3.
+Re-train on previously trained models instead of starting from scratch every time. The agent can learn skills in steps. Balance, walk, turning, stability during interference, jogging, running.
+
+#4.
+Make sure parameters are the same in training as in evaluation. I used a field called `frame_skip` to smooth out rendering in evaluation. Took me 2 weeks until releasing it heavily affects the model´s ability to function properly.
