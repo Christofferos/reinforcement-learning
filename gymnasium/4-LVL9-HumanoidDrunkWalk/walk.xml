@@ -50,13 +50,13 @@
         <light name="light_2" pos="0 10 8" dir="0 -0.25 -1" cutoff="45" exponent="10" diffuse="1 1 1" specular="0.2 0.2 0.2" />
         <light name="light_3" pos="15 -10 8" dir="-0.5 0.25 -1" cutoff="45" exponent="10" diffuse="1 1 1" specular="0.2 0.2 0.2" /> -->
         
-        <geom name="grass_left" condim="3" friction="1 .1 .1" type="box" size="55 5 0.05" pos="20 -10 -0.05" material="MatGrass" />
-        <geom name="grass_right" condim="3" friction="1 .1 .1" type="box" size="55 5 0.05" pos="20 10 -0.05" material="MatGrass" />
-        <geom name="lane_1" condim="3" friction="1 .1 .1" type="box" size="55 1 0.05" pos="20 -4 -0.05" material="MatTrackLight" />
-        <geom name="lane_2" condim="3" friction="1 .1 .1" type="box" size="55 1 0.05" pos="20 -2 -0.05" material="MatTrackDark" />
-        <geom name="lane_3" condim="3" friction="1 .1 .1" type="box" size="55 1 0.05" pos="20 0 -0.05"  material="MatTrackLight" />
-        <geom name="lane_4" condim="3" friction="1 .1 .1" type="box" size="55 1 0.05" pos="20 2 -0.05"  material="MatTrackDark" />
-        <geom name="lane_5" condim="3" friction="1 .1 .1" type="box" size="55 1 0.05" pos="20 4 -0.05"  material="MatTrackLight" />
+        <geom name="grass_left" condim="3" friction="1 .1 .1" type="box" size="30 5 0.05" pos="20 -10 -0.05" material="MatGrass" />
+        <geom name="grass_right" condim="3" friction="1 .1 .1" type="box" size="30 5 0.05" pos="20 10 -0.05" material="MatGrass" />
+        <geom name="lane_1" condim="3" friction="1 .1 .1" type="box" size="30 1 0.05" pos="20 -4 -0.05" material="MatTrackLight" />
+        <geom name="lane_2" condim="3" friction="1 .1 .1" type="box" size="30 1 0.05" pos="20 -2 -0.05" material="MatTrackDark" />
+        <geom name="lane_3" condim="3" friction="1 .1 .1" type="box" size="30 1 0.05" pos="20 0 -0.05"  material="MatTrackLight" />
+        <geom name="lane_4" condim="3" friction="1 .1 .1" type="box" size="30 1 0.05" pos="20 2 -0.05"  material="MatTrackDark" />
+        <geom name="lane_5" condim="3" friction="1 .1 .1" type="box" size="30 1 0.05" pos="20 4 -0.05"  material="MatTrackLight" />
         <geom name="start_line" condim="3" friction="1 .1 .1" type="box" size="0.05 5 0.001" pos="1 0 0.001"  material="MatLine" />
         <geom name="line_1" condim="3" friction="1 .1 .1" type="box" size="30 0.05 0.001" pos="20 -3 0.001" material="MatLine" />
         <geom name="line_2" condim="3" friction="1 .1 .1" type="box" size="30 0.05 0.001" pos="20 -1 0.001" material="MatLine" />
@@ -66,11 +66,15 @@
         
         <site name="target_marker" type="sphere" size="0.15" rgba="0 1 1 0.7" />
 
-        <camera name="fromBack" pos="-1.75 0 1.85" mode="targetbody" target="pelvis"/>
+        <!-- <camera name="fromBack" pos="-1.75 0 1.85" mode="targetbody" target="pelvis"/>
         <camera name="fromFront" pos="3.75 0 1" mode="targetbody" target="pelvis"/>
-        <camera name="zoomOUT" pos="10 0 1.5" mode="targetbody" target="torso"/>
+        <camera name="zoomOUT" pos="10 0 1.5" mode="targetbody" target="torso"/> -->
         
         <body name="torso" pos="0 0 1.4">
+            <camera name="side_view2" mode="trackcom" pos="1 -3 0.5" xyaxes="1 0 0 0 0.4 0.9"/>
+            <camera name="chase_view_backward" mode="trackcom" pos="2.5 0 0.25" xyaxes="0 1 0 -0.342 0 0.940"/>
+            <camera name="side_view1" mode="trackcom" pos="1 3 0.5" xyaxes="-1 0 0 0 -0.4 0.9"/>
+            <camera name="third_person_follower" mode="trackcom" pos="-3 0 0.5" xyaxes="0 -1 0 0.342 0 0.940"/>
             <!-- <camera name="track" mode="trackcom" pos="0 -4 0" xyaxes="1 0 0 0 0 1"/> -->
             <joint armature="0" damping="0" limited="false" name="root" pos="0 0 0" stiffness="0" type="free"/>
             <geom fromto="0 -.07 0 0 .07 0" name="torso1" size="0.07" type="capsule" material="material_shirt"/>

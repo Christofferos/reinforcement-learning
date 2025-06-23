@@ -1,5 +1,5 @@
 import gymnasium as gym
-from walk_logic_with_turning import HumanoidWalkEnv
+from walk_logic_with_turning_3dim import HumanoidWalkEnv
 from stable_baselines3 import PPO, SAC
 import time
 from sb3_contrib import TQC

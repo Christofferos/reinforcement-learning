@@ -1,5 +1,5 @@
 import gymnasium as gym
-from walk_logic_with_turning import HumanoidWalkEnv
+from walk_logic_with_turning_2dim import HumanoidWalkEnv
 import time
 
 env = HumanoidWalkEnv(render_mode="human", frame_skip=1, width=1200, height=800)
