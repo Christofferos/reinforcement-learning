@@ -1,7 +1,7 @@
 from stable_baselines3 import PPO, SAC, TD3
 from sb3_contrib import TQC
 from stable_baselines3.common.env_util import make_vec_env
-from walk_logic_with_turning import HumanoidWalkEnv
+from walk_logic_with_turning_3dim import HumanoidWalkEnv
 import os
 import argparse
 
