@@ -1,0 +1,223 @@
+<mujoco model="parkour-track">
+    <compiler angle="degree" inertiafromgeom="true"/>
+
+    <option integrator="RK4" iterations="50" solver="PGS" timestep="0.003">
+    </option>
+
+    <default>
+        <joint armature="1" damping="1" limited="true"/>
+        <geom conaffinity="1" condim="1" contype="1" margin="0.001" material="geom"/> <!-- rgba="0.8 0.6 .4 1" -->
+        <motor ctrllimited="true" ctrlrange="-.4 .4"/>
+    </default>
+    
+    <size nkey="5" nuser_geom="1"/>
+    
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1=".4 .6 .8" rgb2="0 0 0" width="800" height="800"/>
+        <texture name="grid" type="2d" builtin="checker" rgb1="0 0 0" rgb2="1 1 1" width="300" height="300"/>
+        <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".75"/>
+
+        <texture name="HologramGrid" type="2d" builtin="checker" rgb1="0.1 0.8 1" rgb2="0.05 0.4 0.5" width="100" height="100"/>
+        <material name="HoloStart" texture="HologramGrid" texrepeat="5 5" emission="0.1" specular="0.8" shininess="0.9" rgba="0.5 0.8 1.0 0.7"/>
+
+        <texture name="SimulatedWood" type="cube" builtin="gradient" width="128" height="128" rgb1="0.6 0.4 0.2" rgb2="0.35 0.2 0.1"/>
+        <material name="Wood" texture="SimulatedWood" texrepeat="5 5" emission="0.1" specular="0.2" shininess="0.3" rgba="0.7 0.5 0.3 1"/>
+
+        <texture name="ConcreteTex" type="2d" builtin="flat" width="300" height="300" rgb1="0.4 0.4 0.4" rgb2="0.5 0.5 0.5" random="0.03"/>
+        <material name="Concrete" texture="ConcreteTex" texrepeat="1 1" specular="0.1" shininess="0.1"/>
+        
+        <texture name="MetalTex" type="cube" builtin="flat" width="128" height="128" rgb1="0.9 0.9 0.95" rgb2="0.9 0.9 0.95"/>
+        <material name="Metal" texture="MetalTex" specular="0.9" shininess="1.0" reflectance="0.9"/>
+
+        <material name="geom" rgba="0.8 0.6 .4 1"/> 
+
+        <texture name="WallPanelTex" type="cube" builtin="checker" rgb1="1 1 1" rgb2="1 1 1" width="300" height="300" mark="edge" markrgb="0.1 0.1 0.1"/>
+        <material name="WallPanelMat" texture="WallPanelTex" texrepeat="15 15" texuniform="true" specular="0.1" shininess="0.1" />
+
+         <texture name="WallPanelTex2" type="2d" builtin="checker" rgb1="1 1 1" rgb2="1 1 1" width="300" height="300" mark="edge" markrgb="0.1 0.1 0.1"/>
+        <material name="WallPanelMat2" texture="WallPanelTex2" texrepeat="1 1" texuniform="true" specular="0.1" shininess="0.1" />
+
+        <texture name="PlatformTex" type="2d" builtin="checker" rgb1="0.15 0.2 0.5" rgb2="0.15 0.2 0.5" width="300" height="300" mark="edge" markrgb="1 1 1"/>
+        <material name="PlatformMat" texture="PlatformTex" texrepeat="1 1" texuniform="true" specular="0.1" shininess="0.1" />
+    </asset>
+
+    <worldbody>
+        <geom name="bottom_floor" type="box" size="22 10 0.2" pos="17 0 -2" material="PlatformMat" />
+
+        <geom name="wall_leftA" type="box" size="22 4 0.4" pos="17 -10 1.8" euler="90 0 0" material="WallPanelMat2" />
+        <geom name="wall_left" type="box" size="4.5 0.5 4" pos="15.5 -10 1.8" material="WallPanelMat" />
+
+        <geom name="wall_rightA" type="box" size="22 4 0.4" pos="17 10 1.8" euler="90 0 0" material="WallPanelMat2" />
+        <geom name="wall_right" type="box" size="4.5 0.5 4" pos="15.5 10 1.8" material="WallPanelMat" />
+
+        <geom name="wall_back" type="box" size="0.5 10 4" pos="-5 0 1.8" material="WallPanelMat" />
+        <geom name="wall_front" type="box" size="0.5 10 4" pos="37 0 2" material="WallPanelMat" />
+
+        <light pos="0 0 5" dir="0 0 -1" diffuse="1 1 1" specular="0.1 0.1 0.1" castshadow="true"/>
+        <!-- <geom name="floor" type="plane" size="50 50 0.1" material="grid" condim="3" friction="1 .1 .1"/> --> 
+        
+        <!-- Start Platform -->
+        <geom name="platform_start" type="box" size="3 2 0.1" pos="0 0 -0.1" rgba="0.4 0.5 0.6 1" material="Wood" friction="1 .1 .1"/>
+
+        <geom name="platform_jump_1" type="box" size="1 0.75 0.1" pos="4.2 0 -0.1" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+
+        <geom name="platform_jump_2" type="box" size="1 0.75 0.1" pos="6.5 0 -0.1" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+
+        <geom name="platform_jump_3" type="box" size="1 0.75 0.1" pos="8.9 0 -0.1" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+        
+        <!-- Gap 2 (Medium) -->
+        <geom name="platform_incline" type="box" size="3 2 0.2" pos="12.8 0 0.3" euler="0 -15 0" material="Wood" rgba="0.5 0.6 0.4 1" friction="1 .1 .1"/>
+
+        <!-- Gap 3 (Large with Z difference) -->
+        <geom name="platform_decline" type="box" size="3 2 0.2" pos="18.5 0 0.2" euler="0 15 0" rgba="0.6 0.5 0.4 1" friction="0.75 .1 .1"/>
+        <geom name="step_beam" type="box" size="0.15 2 0.1" pos="15.5 0 1.25" material="Wood" friction="1 .1 .1"/>
+        <geom name="duck_beam" type="box" size="0.15 2 0.1" pos="18.5 0 1.45" material="Wood"/>
+        <geom name="beam_holder_1" type="box" size="0.15 0.15 0.7" pos="18.5 2 0.85" material="Wood"/>
+        <geom name="beam_holder_2" type="box" size="0.15 0.15 0.7" pos="18.5 -2 0.85" material="Wood"/>
+
+        <geom name="platform_landing" type="box" size="2 0.75 0.1" pos="23.7 0 -0.7" rgba="0.4 0.7 0.9 1" friction="1 .1 .1"/>
+
+        <geom name="platform_stair" type="box" size="1 0.75 0.1" pos="26.5 0 -0.5" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+
+        <geom name="platform_stair_2" type="box" size="1 0.75 0.1" pos="27.5 0 -0.3" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+
+        <geom name="platform_stair_3" type="box" size="1 0.75 0.1" pos="28.5 0 -0.1" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
+        
+        <!-- Ramp and High Platform -->
+        <geom name="ramp" type="box" size="2.5 2 0.1" pos="32 0 0.2" euler="0 -20 0" material="Metal" friction="1 .1 .1"/> <!-- SLIPPERY?? -->
+        <geom name="ramp_rail" type="box" size="1.5 0.05 0.5" pos="32 0 0.2" euler="0 -20 0" rgba="0.7 0.1 0.2 1"/>
+
+        <geom name="high_platform" type="box" size="2 2 0.1" pos="36.5 0 1" rgba="1 0.647 0 1" euler="-5 0 0" friction="1 .1 .1"/>
+        <geom name="high_platform2" type="box" size="2 2 0.1" pos="36.5 -4.5 0.5" material="Metal" friction="1 .1 .1"/>
+
+        <!-- The Balance Beam -->
+        <geom name="balance_beam" type="box" size="2 0.15 0.1" pos="33 -4.5 0.5" material="Wood" friction="1 .1 .1"/>
+
+        <!-- The Wall Vault -->
+        <geom name="vault_wall_platform" type="box" size="2 1 0.1" pos="29.4 -4.5 0.45" rgba="0.2 0.8 0.2 1" friction="1 .1 .1"/>
+        <geom name="vault_wall" type="box" size="0.2 1 0.8" pos="29 -4.5 0.15" rgba="0.2 0.8 0.2 1" friction="1 .1 .1"/>
+
+        <!-- The Quad Jumps -->
+        <geom name="jump_1" type="box" size="0.5 0.5 0.2" pos="27 -4.5 0.3" rgba="1 0.647 0 1" friction="1 .1 .1"/>
+        <geom name="jump_2" type="box" size="0.5 0.5 0.2" pos="25.8 -3.5 0.2" rgba="1 0.647 0 1" friction="1 .1 .1"/>
+        <geom name="jump_3" type="box" size="0.5 0.5 0.2" pos="24.6 -4.5 0.1" rgba="1 0.647 0 1" friction="1 .1 .1"/>
+        <geom name="jump_4" type="box" size="0.5 0.5 0.2" pos="23.4 -5.5 0" rgba="1 0.647 0 1" friction="1 .1 .1"/>
+
+        <!-- The Final Leap -->
+        <geom name="finish_platform" type="box" size="1.5 1.5 0.1" pos="21 -5 -0.1" material="grid" friction="1 .1 .1"/>
+
+        <!-- Manually Expanded Ray visualization geoms -->
+        <body name="ray_viz_parent" pos="0 0 0">
+            <geom name="ray_viz_0" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_1" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_2" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_3" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_4" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_5" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_6" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_7" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_8" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+            <geom name="ray_viz_9" type="capsule" size="0.01 0.1" pos="0 0 -10" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+        </body>
+
+        <site name="target_marker" type="sphere" size="0.15" rgba="0 1 1 0.7" />
+        <site name="target_marker_next" type="sphere" size="0.15" rgba="0 1 1 0.3" />
+        
+        <body name="torso" pos="0 0 1.4">
+            <camera name="side_view2" mode="trackcom" pos="1 -3 0.5" xyaxes="1 0 0 0 0.4 0.9"/>
+            <camera name="chase_view_backward" mode="trackcom" pos="2.5 0 0.25" xyaxes="0 1 0 -0.342 0 0.940"/>
+            <camera name="side_view1" mode="trackcom" pos="1 3 0.5" xyaxes="-1 0 0 0 -0.4 0.9"/>
+            <camera name="third_person_follower" mode="trackcom" pos="-3 0 0.5" xyaxes="0 -1 0 0.342 0 0.940"/>
+            <joint armature="0" damping="0" limited="false" name="root" pos="0 0 0" stiffness="0" type="free"/>
+            <geom fromto="0 -.07 0 0 .07 0" name="torso1" size="0.07" type="capsule" material="geom"/>
+            <geom name="head" pos="0 0 .19" size=".09" type="sphere" material="geom" quat="0.707 0 0.507 0"/>
+            <geom fromto="-.01 -.06 -.12 -.01 .06 -.12" name="uwaist" size="0.06" type="capsule" material="geom"/>
+            
+            <body name="lwaist" pos="-.01 0 -0.260" quat="1.000 0 -0.002 0">
+                <geom fromto="0 -.06 0 0 .06 0" name="lwaist" size="0.06" type="capsule" material="geom"/>
+                <joint armature="0.02" axis="0 0 1" damping="5" name="abdomen_z" pos="0 0 0.065" range="-45 45" stiffness="20" type="hinge"/>
+                <joint armature="0.02" axis="0 1 0" damping="5" name="abdomen_y" pos="0 0 0.065" range="-75 30" stiffness="10" type="hinge"/>
+                <body name="pelvis" pos="0 0 -0.165" quat="1.000 0 -0.002 0">
+                    <joint armature="0.02" axis="1 0 0" damping="5" name="abdomen_x" pos="0 0 0.1" range="-35 35" stiffness="10" type="hinge"/>
+                    <geom fromto="-.02 -.07 0 -.02 .07 0" name="butt" size="0.09" type="capsule" material="geom"/>
+                    <body name="right_thigh" pos="0 -0.1 -0.04">
+                        <joint armature="0.01" axis="1 0 0" damping="5" name="right_hip_x" pos="0 0 0" range="-25 5" stiffness="10" type="hinge"/>
+                        <joint armature="0.01" axis="0 0 1" damping="5" name="right_hip_z" pos="0 0 0" range="-60 35" stiffness="10" type="hinge"/>
+                        <joint armature="0.0080" axis="0 1 0" damping="5" name="right_hip_y" pos="0 0 0" range="-110 20" stiffness="20" type="hinge"/>
+                        <geom fromto="0 0 0 0 0.01 -.34" name="right_thigh1" size="0.06" type="capsule" material="geom"/>
+                        <body name="right_shin" pos="0 0.01 -0.403">
+                            <joint armature="0.0060" axis="0 -1 0" name="right_knee" pos="0 0 .02" range="-160 -2" type="hinge"/>
+                            <geom fromto="0 0 0 0 0 -.3" name="right_shin1" size="0.049" type="capsule" material="geom"/>
+                            <body name="right_foot" pos="0 0 -0.45">
+                                <geom name="right_foot" pos="0 0 0.1" size="0.075" type="sphere" user="0" material="geom"/>
+                            </body>
+                        </body>
+                    </body>
+                    <body name="left_thigh" pos="0 0.1 -0.04">
+                        <joint armature="0.01" axis="-1 0 0" damping="5" name="left_hip_x" pos="0 0 0" range="-25 5" stiffness="10" type="hinge"/>
+                        <joint armature="0.01" axis="0 0 -1" damping="5" name="left_hip_z" pos="0 0 0" range="-60 35" stiffness="10" type="hinge"/>
+                        <joint armature="0.01" axis="0 1 0" damping="5" name="left_hip_y" pos="0 0 0" range="-110 20" stiffness="20" type="hinge"/>
+                        <geom fromto="0 0 0 0 -0.01 -.34" name="left_thigh1" size="0.06" type="capsule" material="geom"/>
+                        <body name="left_shin" pos="0 -0.01 -0.403">
+                            <joint armature="0.0060" axis="0 -1 0" name="left_knee" pos="0 0 .02" range="-160 -2" stiffness="1" type="hinge"/>
+                            <geom fromto="0 0 0 0 0 -.3" name="left_shin1" size="0.049" type="capsule" material="geom"/>
+                            <body name="left_foot" pos="0 0 -0.45">
+                                <geom name="left_foot" type="sphere" size="0.075" pos="0 0 0.1" user="0" material="geom"/>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+            <body name="right_upper_arm" pos="0 -0.17 0.06">
+                <joint armature="0.0068" axis="2 1 1" name="right_shoulder1" pos="0 0 0" range="-85 60" stiffness="1" type="hinge"/>
+                <joint armature="0.0051" axis="0 -1 1" name="right_shoulder2" pos="0 0 0" range="-85 60" stiffness="1" type="hinge"/>
+                <geom fromto="0 0 0 .16 -.16 -.16" name="right_uarm1" size="0.04 0.16" type="capsule" material="geom"/>
+                <body name="right_lower_arm" pos=".18 -.18 -.18">
+                    <joint armature="0.0028" axis="0 -1 1" name="right_elbow" pos="0 0 0" range="-90 50" stiffness="0" type="hinge"/>
+                    <geom fromto="0.01 0.01 0.01 .17 .17 .17" name="right_larm" size="0.031" type="capsule" material="geom"/>
+                    <geom name="right_hand" pos=".18 .18 .18" size="0.04" type="sphere" material="geom"/>
+                </body>
+            </body>
+            <body name="left_upper_arm" pos="0 0.17 0.06">
+                <joint armature="0.0068" axis="2 -1 1" name="left_shoulder1" pos="0 0 0" range="-60 85" stiffness="1" type="hinge"/>
+                <joint armature="0.0051" axis="0 1 1" name="left_shoulder2" pos="0 0 0" range="-60 85" stiffness="1" type="hinge"/>
+                <geom fromto="0 0 0 .16 .16 -.16" name="left_uarm1" size="0.04 0.16" type="capsule" material="geom"/>
+                <body name="left_lower_arm" pos=".18 .18 -.18">
+                    <joint armature="0.0028" axis="0 -1 -1" name="left_elbow" pos="0 0 0" range="-90 50" stiffness="0" type="hinge"/>
+                    <geom fromto="0.01 -0.01 0.01 .17 -.17 .17" name="left_larm" size="0.031" type="capsule" material="geom"/>
+                    <geom name="left_hand" pos=".18 -.18 .18" size="0.04" type="sphere" material="geom"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    <tendon>
+        <fixed name="left_hipknee">
+            <joint coef="-1" joint="left_hip_y"/>
+            <joint coef="1" joint="left_knee"/>
+        </fixed>
+        <fixed name="right_hipknee">
+            <joint coef="-1" joint="right_hip_y"/>
+            <joint coef="1" joint="right_knee"/>
+        </fixed>
+    </tendon>
+
+    <actuator>
+        <motor gear="100" joint="abdomen_y" name="abdomen_y"/>
+        <motor gear="100" joint="abdomen_z" name="abdomen_z"/>
+        <motor gear="100" joint="abdomen_x" name="abdomen_x"/>
+        <motor gear="100" joint="right_hip_x" name="right_hip_x"/>
+        <motor gear="100" joint="right_hip_z" name="right_hip_z"/>
+        <motor gear="300" joint="right_hip_y" name="right_hip_y"/>
+        <motor gear="200" joint="right_knee" name="right_knee"/>
+        <motor gear="100" joint="left_hip_x" name="left_hip_x"/>
+        <motor gear="100" joint="left_hip_z" name="left_hip_z"/>
+        <motor gear="300" joint="left_hip_y" name="left_hip_y"/>
+        <motor gear="200" joint="left_knee" name="left_knee"/>
+        <motor gear="25" joint="right_shoulder1" name="right_shoulder1"/>
+        <motor gear="25" joint="right_shoulder2" name="right_shoulder2"/>
+        <motor gear="25" joint="right_elbow" name="right_elbow"/>
+        <motor gear="25" joint="left_shoulder1" name="left_shoulder1"/>
+        <motor gear="25" joint="left_shoulder2" name="left_shoulder2"/>
+        <motor gear="25" joint="left_elbow" name="left_elbow"/>
+    </actuator>
+</mujoco>
