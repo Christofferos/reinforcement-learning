@@ -43,12 +43,12 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         contact_cost_range: tuple[float, float] = (-np.inf, 10.0),
         healthy_reward: float = 0.1,
         terminate_when_unhealthy: bool = True,
-        healthy_z_range: tuple[float, float] = (-0.5, 5.0),
+        healthy_z_range: tuple[float, float] = (-2, 5.0),
         reset_noise_scale: float = 2e-2,
         exclude_current_positions_from_observation: bool = True,
         **kwargs,
     ):
-        xml_path = os.path.join(os.path.dirname(__file__), "parkour_dojo.xml") # "parkour.xml"
+        xml_path = os.path.join(os.path.dirname(__file__), "parkour.xml") # "parkour.xml" # "parkour_dojo.xml"
         utils.EzPickle.__init__(self, xml_path, frame_skip, **kwargs)
 
         self._forward_reward_weight = forward_reward_weight
@@ -67,7 +67,8 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
 
         # === Predefined Parkour Path ===
         self.parkour_path = [
-            np.array([4.2, 0.0, 1.2]),      # platform_jump_1
+            np.array([2.5, 0.0, 1.2]),
+            np.array([3.9, 0.0, 1.2]),      # platform_jump_1
             np.array([6.5, 0.0, 1.2]),      # platform_jump_2
             np.array([8.9, 0.0, 1.2]),      # platform_jump_3
             np.array([12.8, 0.0, 1.6]),     # platform_incline
@@ -96,6 +97,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         self.next_target_point_xyz = self.parkour_path[self.current_target_index]
 
         self.truncation_timer = 0
+        self.idle_counter = 0
 
         # 10-Ray Downward Array Setup
         self.num_rays = 10
@@ -103,7 +105,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         # Spacing of the array in front of the agent
         self.line_x_spacing = 0.2
         # Offset the array from the torso
-        self.line_x_offset = 0.3  # How far the first ray is in front
+        self.line_x_offset = -0.3  # How far the first ray is in front
         self.line_z_offset = 0.0 # **FIX: Start rays from torso's vertical center**
         
         # Generate names for the visualization geoms
@@ -146,7 +148,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
         
-    def _get_obs(self):
+    def _get_obs(self, horizontal_velocity):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
         com_inertia = self.data.cinert[1:].flatten()
@@ -155,7 +157,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         external_contact_forces = self.data.cfrc_ext[1:].flatten()
         
         current_agent_xyz = self.data.qpos[0:3]
-        ray_distances, _, _ = self._get_ray_data()
+        ray_distances, _, _ = self._get_ray_data(horizontal_velocity)
 
         torso_xmat = self.data.body('torso').xmat.reshape(3, 3)
         forward_vec = torso_xmat[:, 0] # The "forward" direction of the torso
@@ -220,20 +222,26 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             self.current_target_index = len(self.parkour_path) - 1
     
         self.target_point_xyz = self.parkour_path[self.current_target_index]
-        # self.next_target_point_xyz = self.parkour_path[min(self.current_target_index + 1, len(self.parkour_path) - 1)]
+        self.next_target_point_xyz = self.parkour_path[min(self.current_target_index + 1, len(self.parkour_path) - 1)]
 
-    def _get_ray_data(self):
+    def _get_ray_data(self, horizontal_vel):
         distances = np.full(self.num_rays, self.ray_length)
         ray_start_positions = np.zeros((self.num_rays, 3))
+        pelvis_pos = self.data.body('pelvis').xpos
+        speed = np.linalg.norm(horizontal_vel)
+        velocity_threshold = 0.1
+ 
+        orientation_matrix = self.data.body('pelvis').xmat.reshape(3, 3) # --- Fallback Case: Agent is not moving ---
+        if speed >= velocity_threshold:
+            forward_dir = horizontal_vel / speed
+            up_dir = np.array([0., 0., 1.])
+            side_dir = np.cross(up_dir, forward_dir)
+            orientation_matrix = np.column_stack([forward_dir, side_dir, up_dir])
         
-        torso_pos = self.data.body('torso').xpos
-        torso_mat = self.data.body('torso').xmat.reshape(3, 3)
-        
-        # All rays point straight down in world frame
-        ray_dir = np.array([0, 0, -1.0])
-        
-        torso_body_id = self.model.body('torso').id
-        geomid = np.array([-1], dtype=np.int32)
+        ray_dir = np.array([0, 0, -1.0]) # rays point straight down in world frame
+        ENVIRONMENT_GROUP = 1
+        geomgroup_flags = np.zeros(6, dtype=np.uint8)
+        geomgroup_flags[ENVIRONMENT_GROUP] = 1
 
         for i in range(self.num_rays):
             # Calculate local offset for each ray's starting point, spaced on X-axis
@@ -244,20 +252,19 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             ])
             
             # Transform local offset to world coordinates
-            world_offset = torso_mat @ local_offset
-            ray_start = torso_pos + world_offset
+            world_offset = orientation_matrix @ local_offset
+            ray_start = pelvis_pos + world_offset
             
             ray_start_positions[i] = ray_start
-        
             dist = mujoco.mj_ray(
                 self.model,
                 self.data,
                 ray_start,
                 ray_dir,
-                geomgroup=None,
+                geomgroup=geomgroup_flags,
                 flg_static=True,
-                bodyexclude=torso_body_id,
-                geomid=geomid
+                bodyexclude=-1,
+                geomid=np.array([-1], dtype=np.int32)
             )
 
             if dist != -1:
@@ -290,14 +297,16 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
     def is_healthy(self):
         min_z, max_z = self._healthy_z_range
         is_healthy = min_z < self.data.qpos[2] < max_z
-
         torso_orientation_matrix = self.data.body("torso").xmat.reshape(3, 3)
         local_up_vector = np.array([0, 0, 1])
         world_up_vector = torso_orientation_matrix @ local_up_vector
         upright_z_value = world_up_vector[2]
-        min_upright_z = 0.5
+        min_upright_z = 0.25
         is_orientation_healthy = upright_z_value > min_upright_z
-        return is_healthy and is_orientation_healthy
+        pelvis_pos = self.data.body("pelvis").xpos
+        torso_pos = self.data.body("torso").xpos
+        is_laydown = (abs(torso_pos[2]) - abs(pelvis_pos[2])) < 0.05
+        return is_healthy and is_laydown == False # and is_orientation_healthy
 
     def step(self, action):
         xyz_position_before = mass_center(self.model, self.data)
@@ -309,24 +318,21 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
 
         progress_reward_scale = 150.0
         reach_bonus_reward = 10.0
-        reach_threshold = 0.5
+        reach_threshold = 0.75
         current_distance_to_target = np.linalg.norm(self.target_point_xyz - xyz_position_after)
         progress_reward = progress_reward_scale * (self.previous_distance_to_target - current_distance_to_target)
         target_reached_bonus = 0.0
         if current_distance_to_target < reach_threshold:
             target_reached_bonus = reach_bonus_reward
             self.target_points_reached += 1
-            self.target_point_xyz = self.next_target_point_xyz # PRACTICE
-            self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE
-            # self._generate_new_target() # REAL DEAL
+            # self.target_point_xyz = self.next_target_point_xyz # PRACTICE
+            # self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE
+            self._generate_new_target() # REAL DEAL
             
         self.previous_distance_to_target = np.linalg.norm(self.target_point_xyz - xyz_position_after) # Update
-
-        fall_penalty = 0.0
-        if not self.is_healthy:
-            fall_penalty = -200.0 / self.target_points_reached
         
-        ray_distances, ray_start_positions, ray_dir = self._get_ray_data()
+        horizontal_velocity = [x_velocity, y_velocity, 0]
+        ray_distances, ray_start_positions, ray_dir = self._get_ray_data(horizontal_velocity)
         
         alive_bonus = self._healthy_reward if self.is_healthy else 0.0
         upright_reward = self._reward_upright()
@@ -334,6 +340,21 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         # centre_position_reward = calc y and z distance and reward walking in line and height of targets
 
         control_cost = -self._ctrl_cost_weight * np.sum(np.square(self.data.ctrl))
+
+        fall_facing_penalty = -0.1 if ray_distances[9] > 3.5 else 0
+
+        idle_penalty = 0
+        idle_speed_threshold = 0.25
+        idle_max_tolerance = 250
+        if abs(x_velocity) <= idle_speed_threshold and abs(y_velocity) <= idle_speed_threshold:
+            idle_penalty = -0.1
+            self.idle_counter += 1
+        else:
+            self.idle_counter = 0
+        
+        fall_penalty = 0.0
+        if not self.is_healthy or self.idle_counter >= idle_max_tolerance:
+            fall_penalty = -200.0 / self.target_points_reached
         
         step_reward = (
             progress_reward +
@@ -342,7 +363,9 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             center_of_mass_offset_penalty +
             fall_penalty +
             control_cost +
-            alive_bonus
+            alive_bonus +
+            fall_facing_penalty +
+            idle_penalty
         )
 
         """ print("REWARDS", 
@@ -352,7 +375,9 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
                 center_of_mass_offset_penalty,
                 fall_penalty,
                 control_cost,
-                alive_bonus) """
+                alive_bonus,
+                fall_facing_penalty,
+                idle_penalty) """
 
         
         if self.render_mode == "human":
@@ -377,7 +402,11 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         self.total_reward += step_reward
         truncation = False
         self.truncation_timer += 1
-        if self.truncation_timer >= (5000 / self.frame_skip):
+        if self.idle_counter >= idle_max_tolerance:
+            terminated = True
+            print("IDLING FAIL.", "TARGETS: ", self.target_points_reached, "REWARD:", np.trunc(self.total_reward))
+            self.total_reward = 0
+        if self.truncation_timer >= (15000 / self.frame_skip):
             print("Truncated. ", "TARGETS: ", self.target_points_reached, "VEL:", x_velocity if x_velocity > 0.01 else 0, y_velocity if y_velocity > 0.01 else 0, "REWARD: ", np.trunc(self.total_reward))
             truncation = True
             self.total_reward = 0
@@ -393,7 +422,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             "y_velocity": y_velocity,
         }
 
-        observation = self._get_obs()
+        observation = self._get_obs(horizontal_velocity)
         self.previous_action = action
         return observation, step_reward, terminated, truncation, info
 
@@ -401,6 +430,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         self.target_points_reached = 1
         self.total_reward = 0.0
         self.truncation_timer = 0
+        self.idle_counter = 0
 
         noise_low = -self._reset_noise_scale
         noise_high = self._reset_noise_scale
@@ -413,20 +443,20 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         )
 
         # --- START: Random Orientation Logic --- PRACTICE WALKING
-        random_yaw_angle = self.np_random.uniform(low=-np.pi, high=np.pi)
+        """ random_yaw_angle = self.np_random.uniform(low=-np.pi, high=np.pi)
         random_orientation_quat = np.array([np.cos(random_yaw_angle / 2), 0, 0, np.sin(random_yaw_angle / 2)])
-        qpos[3:7] = random_orientation_quat
+        qpos[3:7] = random_orientation_quat """
         # --- END: Random Orientation Logic ---
 
         self.current_target_index = -1
-        # self._generate_new_target() # REAL DEAL
-        self.target_point_xyz = self._generate_new_practice_target() # PRACTICE WALKING
-        self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE WALKING
+        self._generate_new_target() # REAL DEAL
+        # self.target_point_xyz = self._generate_new_practice_target() # PRACTICE WALKING
+        # self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE WALKING
 
         current_agent_xyz = self.data.qpos[0:3]
         self.previous_distance_to_target = np.linalg.norm(self.target_point_xyz - current_agent_xyz)
 
         self.set_state(qpos, qvel)
 
-        observation = self._get_obs()
+        observation = self._get_obs([0,0,0])
         return observation
