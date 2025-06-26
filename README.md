@@ -14,7 +14,7 @@ I share my mistakes and what I have learnt from them listed here: `mistakes_lear
    - Mac: `source .venv/bin/activate`
    - Windows: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` then `.\.venv\Scripts\Activate.ps1`
 
-3. `pip install "stable-baselines3[extra]" "gymnasium[mujoco]" "gymnasium[box2d]" shapely numpy`
+3. `pip install "stable-baselines3[extra]" "gymnasium[mujoco]" sb3_contrib "gymnasium[box2d]" shapely numpy`
 4. Run a train file example: `python walk_train.py TQC -t`
 5. Monitor with Tensorflow: `tensorboard --logdir logs`
 6. Compare algorithms on: http://localhost:6006/
