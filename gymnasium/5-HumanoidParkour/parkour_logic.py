@@ -72,7 +72,10 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             np.array([6.5, 0.0, 1.2]),      # platform_jump_2
             np.array([8.9, 0.0, 1.2]),      # platform_jump_3
             np.array([12.8, 0.0, 1.6]),     # platform_incline
+            np.array([15, 0.0, 2.15]),     # platform_incline top
+            np.array([16, 0.0, 2.15]),     # platform_decline start 
             np.array([18.5, 0.0, 1.0]),     # platform_decline
+            np.array([20.5, 0.0, 0.8]),
             np.array([23.7, 0.0, 0.5]),     # platform_landing
             np.array([26, 0.0, 0.65]),
             np.array([27.0, 0.0, 0.80]),
@@ -354,7 +357,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         
         fall_penalty = 0.0
         if not self.is_healthy or self.idle_counter >= idle_max_tolerance:
-            fall_penalty = -200.0 / self.target_points_reached
+            fall_penalty = -350.0 / self.target_points_reached
         
         step_reward = (
             progress_reward +
@@ -448,7 +451,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         qpos[3:7] = random_orientation_quat """
         # --- END: Random Orientation Logic ---
 
-        self.current_target_index = -1
+        self.current_target_index = -1 # -1
         self._generate_new_target() # REAL DEAL
         # self.target_point_xyz = self._generate_new_practice_target() # PRACTICE WALKING
         # self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE WALKING
