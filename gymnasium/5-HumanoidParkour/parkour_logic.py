@@ -293,8 +293,8 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         com_error = np.linalg.norm(xy_position_after - support_center_xy)
         # 5. Create the reward. This is a PENALTY, so it's negative.
         #    The agent is rewarded for keeping this error small.
-        penalty_weight = -2.5 # -1.5
-        return penalty_weight * com_error
+        reward_com_stability = -1.5 * com_error
+        return reward_com_stability
 
     @property
     def is_healthy(self):
@@ -319,7 +319,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         xyz_velocity = (xyz_position_after - xyz_position_before) / self.dt
         x_velocity, y_velocity, z_velocity = xyz_velocity
 
-        progress_reward_scale = 15.0
+        progress_reward_scale = 150.0
         reach_bonus_reward = 10.0
         reach_threshold = 0.75
         current_distance_to_target = np.linalg.norm(self.target_point_xyz - xyz_position_after)
@@ -357,7 +357,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         
         fall_penalty = 0.0
         if not self.is_healthy or self.idle_counter >= idle_max_tolerance:
-            fall_penalty = -10
+            fall_penalty = -200.0 / self.target_points_reached
         
         step_reward = (
             progress_reward +
@@ -380,8 +380,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
                 control_cost,
                 alive_bonus,
                 fall_facing_penalty,
-                idle_penalty
-                ) """
+                idle_penalty) """
 
         
         if self.render_mode == "human":
