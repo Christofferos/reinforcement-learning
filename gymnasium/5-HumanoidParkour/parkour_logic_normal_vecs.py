@@ -219,7 +219,6 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
     def _get_ray_data(self, horizontal_vel):
         distances = np.full(self.num_rays, self.ray_length)
         normals = np.tile(np.array([0., 0., 1.]), (self.num_rays, 1))
-
         ray_start_positions = np.zeros((self.num_rays, 3))
         pelvis_pos = self.data.body('pelvis').xpos
         speed = np.linalg.norm(horizontal_vel)
@@ -232,12 +231,11 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             side_dir = np.cross(up_dir, forward_dir)
             orientation_matrix = np.column_stack([forward_dir, side_dir, up_dir])
         
-        ray_dir_down = np.array([0, 0, -self.ray_length])
-        normal_calc_offset = 0.05 
-
+        ray_dir_down = np.array([0, 0, -1.0])
         ENVIRONMENT_GROUP = 1
         geomgroup_flags = np.zeros(6, dtype=np.uint8)
         geomgroup_flags[ENVIRONMENT_GROUP] = 1
+        normal_calc_offset = 0.05
 
         for i in range(self.num_rays):
             # --- Step 1: Find the central hit point (as before) ---
@@ -246,11 +244,21 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             ray_start = pelvis_pos + world_offset
             ray_start_positions[i] = ray_start # For visualization
 
-            dist = mujoco.mj_ray(self.model, self.data, ray_start, ray_dir_down, geomgroup_flags, True, -1, np.array([-1], dtype=np.int32))
+            dist = mujoco.mj_ray(
+                self.model,
+                self.data,
+                ray_start,
+                ray_dir_down,
+                geomgroup=geomgroup_flags,
+                flg_static=True,
+                bodyexclude=-1,
+                geomid=np.array([-1], dtype=np.int32)
+            )
 
-            if dist != -1 and dist < 1.0: # Only calculate normal if ground is reasonably close
-                distances[i] = dist * self.ray_length
-                
+            if dist != -1:
+                distances[i] = dist
+
+            if dist != -1 and dist < 1.0: # Only calculate normal if ground is reasonably close                
                 # --- Step 2: Find two more points nearby to define a plane ---
                 p0 = ray_start + ray_dir_down * dist # Central hit point
 
