@@ -32,7 +32,7 @@
         <material name="Concrete" texture="ConcreteTex" texrepeat="1 1" specular="0.1" shininess="0.1"/>
         
         <texture name="MetalTex" type="cube" builtin="flat" width="128" height="128" rgb1="0.9 0.9 0.95" rgb2="0.9 0.9 0.95"/>
-        <material name="Metal" texture="MetalTex" specular="0.9" shininess="1.0" reflectance="0.9"/>
+        <material name="Metal" texture="MetalTex" specular="0.1" shininess="0.1" reflectance="0.1"/>
 
         <material name="geom" rgba="0.8 0.6 .4 1"/> 
         <texture name="WallPanelTex" type="cube" builtin="checker" rgb1="1 1 1" rgb2="1 1 1" width="300" height="300" mark="edge" markrgb="0.1 0.1 0.1"/>
@@ -60,11 +60,11 @@
         <geom name="platform_incline" group="1" condim="3" type="box" size="3 2 0.2" pos="12.8 0 0.3" euler="0 -15 0" material="Concrete" rgba="0.5 0.6 0.4 1" friction="1 .1 .1"/>
 
         <!-- Gap 3 (Large with Z difference) -->
-        <geom name="platform_decline" group="1" condim="3" type="box" size="3 2 0.2" pos="18.5 0 0.2" euler="0 15 0" rgba="0.6 0.5 0.4 1" friction="0.75 .1 .1"/>
-        <geom name="step_beam" group="1" condim="3" type="box" size="0.15 2 0.1" pos="15.5 0 1.25" material="Wood" friction="1 .1 .1"/>
-        <geom name="duck_beam" type="box" size="0.15 2 0.1" pos="18.5 0 1.45" material="Wood"/>
-        <geom name="beam_holder_1" type="box" size="0.15 0.15 0.7" pos="18.5 2 0.85" material="Wood"/>
-        <geom name="beam_holder_2" type="box" size="0.15 0.15 0.7" pos="18.5 -2 0.85" material="Wood"/>
+        <geom name="platform_decline" group="1" condim="3" type="box" size="3 2 0.2" pos="18.5 0 0.3" euler="0 15 0" rgba="0.6 0.5 0.4 1" friction="0.75 .1 .1"/>
+        <!-- <geom name="step_beam" group="1" condim="3" type="box" size="0.15 2 0.1" pos="15.5 0 1" material="Wood" friction="1 .1 .1"/> -->
+        <geom name="duck_beam" type="box" size="0.15 2 0.1" pos="18.5 0 2.2" material="Wood"/>
+        <geom name="beam_holder_1" type="box" size="0.15 0.15 1.2" pos="18.5 2 1" material="Wood"/>
+        <geom name="beam_holder_2" type="box" size="0.15 0.15 1.2" pos="18.5 -2 1" material="Wood"/>
 
         <geom name="platform_landing" group="1" condim="3" type="box" size="2 0.75 0.1" pos="23.7 0 -0.7" rgba="0.4 0.7 0.9 1" friction="1 .1 .1"/>
 
@@ -75,8 +75,8 @@
         <geom name="platform_stair_3" group="1" condim="3" type="box" size="1 0.75 0.1" pos="28.5 0 -0.1" rgba="0.7 0.1 0.2 1" friction="1 .1 .1"/>
         
         <!-- Ramp and High Platform -->
-        <geom name="ramp" type="box" group="1" condim="3" size="2.5 2 0.1" pos="32 0 0.2" euler="0 -20 0" material="Metal" friction="1 .1 .1"/> <!-- SLIPPERY?? -->
-        <geom name="ramp_rail" type="box" size="1.5 0.05 0.5" pos="32 0 0.2" euler="0 -20 0" rgba="0.7 0.1 0.2 1"/>
+        <geom name="ramp" type="box" group="1" condim="3" size="2.5 2 0.1" pos="32 0 0.4" euler="0 -15 0" material="Metal" friction="1 .1 .1"/> <!-- SLIPPERY?? -->
+        <geom name="ramp_rail" type="box" size="1.5 0.05 0.5" pos="32 0 0.4" euler="0 -15 0" rgba="0.7 0.1 0.2 1"/>
 
         <geom name="high_platform" group="1" condim="3" type="box" size="2 2 0.1" pos="36.5 0 1" rgba="1 0.647 0 1" euler="-5 0 0" friction="1 .1 .1"/>
         <geom name="high_platform2" group="1" condim="3" type="box" size="2 2 0.1" pos="36.5 -4.5 0.5" material="Metal" friction="1 .1 .1"/>

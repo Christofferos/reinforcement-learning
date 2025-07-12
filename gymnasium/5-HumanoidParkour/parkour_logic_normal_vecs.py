@@ -41,7 +41,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         ctrl_cost_weight: float = 0.1,
         contact_cost_weight: float = 5e-7,
         contact_cost_range: tuple[float, float] = (-np.inf, 10.0),
-        healthy_reward: float = 0.1,
+        healthy_reward: float = 0.75,
         terminate_when_unhealthy: bool = True,
         healthy_z_range: tuple[float, float] = (-2, 5.0),
         reset_noise_scale: float = 2e-2,
@@ -76,17 +76,18 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
             np.array([16, 0.0, 2.15]),     # platform_decline start 
             np.array([18.5, 0.0, 1.0]),     # platform_decline
             np.array([20.5, 0.0, 0.8]),
-            np.array([23.7, 0.0, 0.5]),     # platform_landing
-            np.array([26, 0.0, 0.65]),
-            np.array([27.0, 0.0, 0.80]),
-            np.array([28.5, 0.0, 0.95]),     # platform_stair_3 (end of stairs)
-            np.array([32.0, 1.0, 1.5]),     # ramp
-            np.array([35.5, 0.0, 1.95]),     # high_platform
-            np.array([35.5, -4.5, 1.60]),    # high_platform2
-            np.array([33.0, -4.5, 1.60]),    # balance_beam
-            np.array([30.5, -4.5, 1.60]),   # vault_wall_platform
-            np.array([29.0, -4.5, 1.85]),
-            np.array([27.0, -4.5, 1.50]),    # jump_1 (second set)
+            np.array([23.7, 0.0, 0.25]),     # platform_landing
+            np.array([24.5, 0.0, 0.25]),     # platform_landing
+            np.array([26, 0.0, 0.4]),
+            np.array([27.0, 0.0, 0.55]),
+            np.array([28.5, 0.0, 0.7]),     # platform_stair_3 (end of stairs)
+            np.array([32.0, 1.0, 1.15]),     # ramp
+            np.array([35.5, 0.0, 1.7]),     # high_platform
+            np.array([35.5, -4.5, 1.45]),    # high_platform2
+            np.array([33.0, -4.5, 1.45]),    # balance_beam
+            np.array([30.5, -4.5, 1.45]),   # vault_wall_platform
+            np.array([29.0, -4.5, 1.8]),
+            np.array([27.0, -4.5, 1.45]),    # jump_1 (second set)
             np.array([25.8, -3.5, 1.4]),    # jump_2 (second set)
             np.array([24.6, -4.5, 1.3]),    # jump_3 (second set)
             np.array([23.4, -5.5, 1.2]),    # jump_4 (second set)
@@ -95,7 +96,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         self.current_target_index = self.parkour_path.__len__() - 1
         self.target_point_xyz = self.parkour_path[self.current_target_index]
         self.previous_distance_to_target = 0.0
-        self.target_points_reached = 1
+        self.target_points_reached = 0
 
         self.next_target_point_xyz = self.parkour_path[self.current_target_index]
 
@@ -375,17 +376,55 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         
         fall_penalty = 0.0
         if not self.is_healthy or self.idle_counter >= idle_max_tolerance:
-            fall_penalty = -200.0 / self.target_points_reached
+            fall_penalty = -200.0
+
+        # --- START OF NEW REWARD CALCULATIONS ---
+
+        # === REWARD NR 1: VERTICAL PROGRESS ===
+        vertical_progress_reward = 0.0
+        if abs(ray_distances[3] - ray_distances[0]) > 0.15:
+            vertical_progress_reward = z_velocity * 1.5
+
+        contact_force_threshold = 0.2  # Tune this threshold as needed
+        left_foot_forcetorque = self.data.cfrc_ext[self.model.body('left_foot').id]
+        right_foot_forcetorque = self.data.cfrc_ext[self.model.body('right_foot').id]
+        left_foot_contact = np.linalg.norm(left_foot_forcetorque) > contact_force_threshold
+        right_foot_contact = np.linalg.norm(right_foot_forcetorque) > contact_force_threshold
+
+        left_foot_z = self.data.body('left_foot').xpos[2]
+        right_foot_z = self.data.body('right_foot').xpos[2]
+
+        foot_clearance_reward = 0.0
+        swing_foot_height = 0
+        if left_foot_contact and not right_foot_contact:
+            swing_foot_height = right_foot_z - left_foot_z
+        elif not left_foot_contact and right_foot_contact:
+            swing_foot_height = left_foot_z - right_foot_z
+        foot_clearance_reward = swing_foot_height * 1.2
+
+        right_foot_lift_reward = 0.0
+        if abs(ray_distances[2] - ray_distances[0]) > 0.15:
+            right_foot_lift_reward = 1.5 * abs(self.data.body('right_foot').cvel[2])
+        # --- END OF NEW REWARD CALCULATIONS ---
         
+        # print("HERE ", right_foot_z, left_foot_z, right_foot_lift_reward)
+
         step_reward = (
+            foot_clearance_reward +
+            vertical_progress_reward +
             target_reached_bonus +
             progress_reward +
             upright_reward +
             center_of_mass_offset_penalty +
-            idle_penalty
+            idle_penalty +
+            right_foot_lift_reward
         )
+        # fall_penalty +
+        # alive_bonus +
 
         """ print("REWARDS", 
+                foot_clearance_reward,
+                vertical_progress_reward,
                 target_reached_bonus,
                 progress_reward,
                 upright_reward,
@@ -440,7 +479,7 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         return observation, step_reward, terminated, truncation, info
 
     def reset_model(self):
-        self.target_points_reached = 1
+        self.target_points_reached = 0
         self.total_reward = 0.0
         self.truncation_timer = 0
         self.idle_counter = 0
@@ -461,7 +500,10 @@ class HumanoidParkourEnv(MujocoEnv, utils.EzPickle):
         qpos[3:7] = random_orientation_quat """
         # --- END: Random Orientation Logic ---
 
-        self.current_target_index = -1 # -1
+        # qpos[0] = 9 + self.np_random.uniform(low=noise_low, high=noise_high, size=1)[0]
+        # qpos[0] = 24 + self.np_random.uniform(low=noise_low, high=noise_high, size=1)[0]
+
+        self.current_target_index = -1 # -1 # 3 # 8
         self._generate_new_target() # REAL DEAL
         # self.target_point_xyz = self._generate_new_practice_target() # PRACTICE WALKING
         # self.next_target_point_xyz = self._generate_new_practice_target(self.target_point_xyz) # PRACTICE WALKING
