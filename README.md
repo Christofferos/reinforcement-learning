@@ -4,6 +4,12 @@ Here I am, learning everything in the world of "Reinforcement Learning" 🦾🤖
 
 My journey through this jungle 🏝️ will be shared to give you a map 🗺️. A map which leads to Eldorado (or Shambala if you are an Uncharted fan). Follow along on this exhilerating journey. And maybe together we can find this city of gold 💰🏆.
 
+Here are some of the projects I have done. Have a look:
+1. https://www.youtube.com/shorts/LoGcZkZzLSA
+2. https://www.youtube.com/watch?v=_F91ktb_wxU
+3. https://www.youtube.com/watch?v=CYF2pNHuyC8
+4. https://www.instagram.com/kristopherwerlinder/reel/DKp3ZuxKV3c/
+
 I share my mistakes and what I have learnt from them listed here: `mistakes_learnings.md`.
 
 ## Get started
