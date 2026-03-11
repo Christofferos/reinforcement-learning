@@ -1,8 +1,16 @@
+<table>
+  <tr>
+    <td><img width="418" alt="image" src="https://github.com/user-attachments/assets/37e3f119-abd1-440f-83aa-c2ca473d7e97" /></td>
+    <td><img width="418" alt="image" src="https://github.com/user-attachments/assets/65eebfd4-23e8-4efe-94d3-df0c2fbddf35" /></td>
+    <td><img width="418" alt="image" src="https://github.com/user-attachments/assets/61f861b1-a9f3-4e11-867e-9caf9a1b334b" /></td>
+  </tr>
+</table>
+
 Here are some of the projects I have done. Have a look:
 1. https://www.youtube.com/shorts/LoGcZkZzLSA
 2. https://www.youtube.com/watch?v=_F91ktb_wxU
 3. https://www.youtube.com/watch?v=CYF2pNHuyC8
-4. https://www.instagram.com/kristopherwerlinder/reel/DKp3ZuxKV3c/
+
 
 # Reinforcement Learning 🗺️
 
