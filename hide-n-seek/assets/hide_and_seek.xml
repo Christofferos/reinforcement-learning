@@ -1,0 +1,371 @@
+<!--
+  Hide and Seek MuJoCo Environment
+  ═══════════════════════════════════════════════════════════════════
+  Inspired by OpenAI's "Emergent Tool Use From Multi-Agent Autocurricula" (2019)
+
+  Layout (top-down, Y points up):
+  ┌────────────────────────────────────────────┐
+  │                                            │
+  │   ROOM NW (seekers start)    │   ROOM NE   │
+  │   (open area — no roof)      ╡D           │
+  │                              │             │
+  │──────────╡D   ───────────────┤             │
+  │                              │─────╡D──────│
+  │                              │             │
+  │   ROOM SW                    │   ROOM SE   │
+  │                     D╞───────┤   (hiders)  │
+  │                              │             │
+  └────────────────────────────────────────────┘
+
+  - 3 corner rooms (NE, SE, SW) each with 1–2 door gaps
+  - 1 open quadrant (NW) where seekers spawn
+  - Hiders start in SE room; seekers start in NW open area
+  - Boxes placed near room doors so hiders can barricade
+  - Ramps placed in open area (seekers can use to bypass walls)
+
+  Color palette matched to hidenseek-html-mockup.html:
+    sky/fog  #2a2a3e    floor  #37474f    wall  #546e7a
+    box      #8d8d8d    ramp   #81c784
+    hider    #4fc3f7    seeker #ef5350
+    sun      #fff5e0    ambient 50%
+-->
+<mujoco model="hide_and_seek">
+  <compiler angle="radian" coordinate="local" inertiafromgeom="true"/>
+
+  <option timestep="0.02" gravity="0 0 -9.81" integrator="Euler">
+    <flag warmstart="enable"/>
+  </option>
+
+  <default>
+    <geom condim="6" friction="0.4 0.3 0.1" margin="0.001"/>
+    <joint damping="0.5" armature="0.01"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0"/>
+  </default>
+
+  <!-- ═══════════════════ ASSETS ═══════════════════ -->
+  <asset>
+    <!-- Sky: dark indigo #2a2a3e -->
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.165 0.165 0.243" rgb2="0.06 0.06 0.10"
+             width="512" height="512"/>
+    <!-- Ground: uniform grey tile -->
+    <texture name="groundplane" type="2d" builtin="flat"
+             rgb1="0.24 0.30 0.34" rgb2="0.24 0.30 0.34"
+             width="64" height="64"/>
+    <material name="groundplane" texture="groundplane"
+              texuniform="true" reflectance="0" shininess="0"
+              specular="0" emission="0"/>
+    <!-- Walls: slate #546e7a -->
+    <material name="wall_mat"   rgba="0.329 0.431 0.478 1" reflectance="0.12" shininess="0.15"/>
+    <!-- Hiders: cyan #4fc3f7 -->
+    <material name="hider_mat"  rgba="0.310 0.765 0.969 1" reflectance="0.30" shininess="0.6" specular="0.4"/>
+    <!-- Seekers: red #ef5350 -->
+    <material name="seeker_mat" rgba="0.937 0.325 0.314 1" reflectance="0.30" shininess="0.6" specular="0.4"/>
+    <!-- Boxes: grey #8d8d8d -->
+    <material name="box_mat"    rgba="0.553 0.553 0.553 1" reflectance="0.08" shininess="0.15"/>
+    <!-- Ramps: green #81c784 -->
+    <material name="ramp_mat"   rgba="0.506 0.780 0.518 1" reflectance="0.08" shininess="0.15"/>
+    <!-- Locked: magenta -->
+    <material name="locked_mat" rgba="0.85 0.20 0.85 1" reflectance="0.20" shininess="0.4"/>
+    <!-- Ramp wedge mesh (triangular prism — convex hull of 6 vertices) -->
+    <mesh name="ramp_wedge_0"
+          vertex="-1.2000 -0.4000 -0.2833  -1.2000  0.4000 -0.2833
+                   1.2000 -0.4000 -0.2833   1.2000  0.4000 -0.2833
+                   1.2000 -0.4000  0.5667   1.2000  0.4000  0.5667"/>
+  </asset>
+
+  <!-- ═══════════════════ VISUAL ═══════════════════ -->
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+    <headlight ambient="0.35 0.35 0.38" diffuse="0.30 0.30 0.33" specular="0.08 0.08 0.08"/>
+  </visual>
+
+  <!-- ═══════════════════ WORLD ═══════════════════ -->
+  <worldbody>
+
+    <!-- Ground plane (extends far to hide skybox at horizon) -->
+    <geom name="floor" type="plane" size="200 200 0.1" material="groundplane" conaffinity="1" condim="6"/>
+
+    <!-- Tile grid lines (OpenAI-style seams) -->
+    <geom name="gridY_0" type="box" pos="0 -50.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_1" type="box" pos="0 -48.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_2" type="box" pos="0 -46.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_3" type="box" pos="0 -44.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_4" type="box" pos="0 -42.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_5" type="box" pos="0 -40.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_6" type="box" pos="0 -38.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_7" type="box" pos="0 -36.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_8" type="box" pos="0 -34.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_9" type="box" pos="0 -32.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_10" type="box" pos="0 -30.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_11" type="box" pos="0 -28.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_12" type="box" pos="0 -26.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_13" type="box" pos="0 -24.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_14" type="box" pos="0 -22.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_15" type="box" pos="0 -20.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_16" type="box" pos="0 -18.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_17" type="box" pos="0 -16.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_18" type="box" pos="0 -14.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_19" type="box" pos="0 -12.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_20" type="box" pos="0 -10.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_21" type="box" pos="0 -8.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_22" type="box" pos="0 -6.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_23" type="box" pos="0 -4.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_24" type="box" pos="0 -2.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_25" type="box" pos="0 0.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_26" type="box" pos="0 2.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_27" type="box" pos="0 4.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_28" type="box" pos="0 6.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_29" type="box" pos="0 8.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_30" type="box" pos="0 10.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_31" type="box" pos="0 12.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_32" type="box" pos="0 14.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_33" type="box" pos="0 16.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_34" type="box" pos="0 18.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_35" type="box" pos="0 20.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_36" type="box" pos="0 22.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_37" type="box" pos="0 24.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_38" type="box" pos="0 26.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_39" type="box" pos="0 28.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_40" type="box" pos="0 30.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_41" type="box" pos="0 32.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_42" type="box" pos="0 34.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_43" type="box" pos="0 36.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_44" type="box" pos="0 38.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_45" type="box" pos="0 40.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_46" type="box" pos="0 42.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_47" type="box" pos="0 44.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_48" type="box" pos="0 46.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_49" type="box" pos="0 48.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridY_50" type="box" pos="0 50.00 0.002" size="50.0 0.02 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_51" type="box" pos="-50.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_52" type="box" pos="-48.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_53" type="box" pos="-46.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_54" type="box" pos="-44.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_55" type="box" pos="-42.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_56" type="box" pos="-40.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_57" type="box" pos="-38.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_58" type="box" pos="-36.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_59" type="box" pos="-34.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_60" type="box" pos="-32.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_61" type="box" pos="-30.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_62" type="box" pos="-28.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_63" type="box" pos="-26.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_64" type="box" pos="-24.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_65" type="box" pos="-22.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_66" type="box" pos="-20.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_67" type="box" pos="-18.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_68" type="box" pos="-16.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_69" type="box" pos="-14.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_70" type="box" pos="-12.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_71" type="box" pos="-10.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_72" type="box" pos="-8.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_73" type="box" pos="-6.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_74" type="box" pos="-4.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_75" type="box" pos="-2.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_76" type="box" pos="0.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_77" type="box" pos="2.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_78" type="box" pos="4.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_79" type="box" pos="6.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_80" type="box" pos="8.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_81" type="box" pos="10.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_82" type="box" pos="12.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_83" type="box" pos="14.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_84" type="box" pos="16.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_85" type="box" pos="18.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_86" type="box" pos="20.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_87" type="box" pos="22.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_88" type="box" pos="24.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_89" type="box" pos="26.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_90" type="box" pos="28.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_91" type="box" pos="30.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_92" type="box" pos="32.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_93" type="box" pos="34.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_94" type="box" pos="36.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_95" type="box" pos="38.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_96" type="box" pos="40.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_97" type="box" pos="42.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_98" type="box" pos="44.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_99" type="box" pos="46.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_100" type="box" pos="48.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+    <geom name="gridX_101" type="box" pos="50.00 0 0.002" size="0.02 50.0 0.002" rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+
+    <!-- Lighting (warm key + cool fill, matching HTML mockup's #fff5e0 sun) -->
+    <light name="key_light"  pos="5 -5 14" dir="-0.3 0.3 -1"
+           diffuse="1.0 0.96 0.88" specular="0.45 0.43 0.40" cutoff="60" castshadow="true"/>
+    <light name="fill_light" pos="-5 5 10" dir="0.3 -0.3 -1"
+           diffuse="0.28 0.30 0.38" specular="0.06 0.06 0.08" cutoff="80"/>
+    <light name="rim_light"  pos="0 0 16"  dir="0 0 -1"
+           diffuse="0.18 0.18 0.22" specular="0.12 0.12 0.12" cutoff="100"/>
+
+    <!-- Overview camera — shows the full arena without needing to zoom out -->
+    <camera name="overview" pos="0 -12 20" xyaxes="1 0 0 0 0.55 0.84" fovy="55"/>
+
+    <!-- ────────────── OUTER ARENA WALLS (12m × 12m, tall — 2.4m) ────────────── -->
+    <!--  wall color: #546e7a → rgba="0.329 0.431 0.478 1" -->
+    <body name="wall_north" pos="0 6 0.7">
+      <geom type="box" size="5.80 0.2 0.7" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <body name="wall_south" pos="0 -6 0.7">
+      <geom type="box" size="5.80 0.2 0.7" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <body name="wall_east" pos="6 0 0.7">
+      <geom type="box" size="0.2 6.20 0.7" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <body name="wall_west" pos="-6 0 0.7">
+      <geom type="box" size="0.2 6.20 0.7" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+
+    <!--
+      ══════════════ INTERNAL ROOM WALLS ══════════════
+
+      Wider doors (~2.5–3m) for spacious gameplay.
+
+        (-6,6)─────────────────────────────(6,6)
+        │          NW (open)               │
+        │       seekers spawn              │
+        │                         ┃        │
+        │                         ┃  NE    │
+        │     ~~~door 2.5m~~~     ┃  room  │
+        ├─────               ─────┨        │
+        │                  ~door 3.0m~     │
+        │                         ┃        │
+        │   SW room               ┃  SE    │
+        │     ~~~door 2.5m~~~     ┃  room  │
+        ├─────               ─────┨(hiders)│
+        │                         ┃        │
+        (-6,-6)────────────────────────────(6,-6)
+
+      Vertical wall at x=1.5  (3 segments, 2 door gaps of ~2.5m)
+      Horizontal wall y=-3    (2 segments, 1 door gap  of ~2.5m)  — SW room north wall
+      Horizontal wall y=2     (2 segments, 1 door gap  of ~2.5m)  — NE room south wall
+    -->
+
+    <!-- ── Vertical wall: x=1.5, y=-6 to y=6, two doors ── -->
+
+    <!-- Seg 1: y=-6 to y=-5.25 -->
+    <body name="vwall_s" pos="1.5 -5.625 0.500">
+      <geom type="box" size="0.12 0.375 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <!-- DOOR: y=-5.25 to y=-2.25  (3.0m gap — lower door) -->
+    <!-- Seg 2: y=-2.25 to y=1.75  (shortened center, wider gap above) -->
+    <body name="vwall_mid" pos="1.5 -0.25 0.500">
+      <geom type="box" size="0.12 2.0 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <!-- DOOR: y=1.75 to y=4.25   (2.5m gap — upper door) -->
+    <!-- Seg 3: y=4.25 to y=6 -->
+    <body name="vwall_n" pos="1.5 5.125 0.500">
+      <geom type="box" size="0.12 0.875 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+
+    <!-- ── Horizontal wall y=-3: SW room north wall, one 2.5m door ── -->
+
+    <!-- Seg W: x=-6 to x=-2.5 -->
+    <body name="hwall_sw_w" pos="-4.25 -3.0 0.500">
+      <geom type="box" size="1.75 0.12 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <!-- DOOR: x=-2.5 to x=0.0  (2.5m gap) -->
+    <!-- Seg E: x=0.0 to x=1.38 -->
+    <body name="hwall_sw_e" pos="0.69 -3.0 0.500">
+      <geom type="box" size="0.69 0.12 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+
+    <!-- ── Horizontal wall y=2: NE room south wall, one 2.5m door ── -->
+
+    <!-- Seg W: x=1.62 to x=3.0 -->
+    <body name="hwall_ne_w" pos="2.31 2.0 0.500">
+      <geom type="box" size="0.69 0.12 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+    <!-- DOOR: x=3.0 to x=5.5  (2.5m gap) -->
+    <!-- Seg E: x=5.5 to x=6 -->
+    <body name="hwall_ne_e" pos="5.75 2.0 0.500">
+      <geom type="box" size="0.25 0.12 0.500" rgba="0.329 0.431 0.478 1" conaffinity="1" condim="3"/>
+    </body>
+
+    <!-- ══════════════ AGENTS ══════════════ -->
+
+    <!-- Hider 0 — #4fc3f7 cyan, starts in SE room -->
+    <body name="hider_0" pos="3.5 -4.0 0.35">
+      <freejoint name="hider_0_joint"/>
+      <geom name="hider_0_geom" type="sphere" size="0.35" density="11"
+            rgba="0.310 0.765 0.969 1" conaffinity="1" condim="6" friction="0.3 0.1 0.05"/>
+      <site name="Hider Jacob" pos="0 0 0.55" size="0.01" rgba="0.31 0.76 0.97 0.01"/>
+      <geom type="cylinder" size="0.42 0.02" pos="0 0 0" mass="0" rgba="0.31 0.76 0.97 0.10" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Hider 1 — #4fc3f7 cyan, starts in SE room -->
+    <body name="hider_1" pos="4.5 -4.5 0.35">
+      <freejoint name="hider_1_joint"/>
+      <geom name="hider_1_geom" type="sphere" size="0.35" density="11"
+            rgba="0.310 0.765 0.969 1" conaffinity="1" condim="6" friction="0.3 0.1 0.05"/>
+      <site name="Hider Lucas" pos="0 0 0.55" size="0.01" rgba="0.31 0.76 0.97 0.01"/>
+      <geom type="cylinder" size="0.42 0.02" pos="0 0 0" mass="0" rgba="0.31 0.76 0.97 0.10" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Seeker 0 — #ef5350 red, starts in NW open area -->
+    <body name="seeker_0" pos="-3.5 3.5 0.35">
+      <freejoint name="seeker_0_joint"/>
+      <geom name="seeker_0_geom" type="sphere" size="0.35" density="11"
+            rgba="0.937 0.325 0.314 1" conaffinity="1" condim="6" friction="0.3 0.1 0.05"/>
+      <site name="Seeker Mikael" pos="0 0 0.55" size="0.01" rgba="0.94 0.33 0.31 0.01"/>
+      <geom type="cylinder" size="0.42 0.02" pos="0 0 0" mass="0" rgba="0.94 0.33 0.31 0.10" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Seeker 1 — #ef5350 red, starts in NW open area -->
+    <body name="seeker_1" pos="-4.5 4.5 0.35">
+      <freejoint name="seeker_1_joint"/>
+      <geom name="seeker_1_geom" type="sphere" size="0.35" density="11"
+            rgba="0.937 0.325 0.314 1" conaffinity="1" condim="6" friction="0.3 0.1 0.05"/>
+      <site name="Seeker Kriss" pos="0 0 0.55" size="0.01" rgba="0.94 0.33 0.31 0.01"/>
+      <geom type="cylinder" size="0.42 0.02" pos="0 0 0" mass="0" rgba="0.94 0.33 0.31 0.10" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- ══════════════ MOVEABLE BOXES ══════════════ -->
+
+    <!-- Box 0: near SE vertical-wall door — #8d8d8d grey -->
+    <body name="box_0" pos="2.8 -1.9 0.3">
+      <freejoint name="box_0_joint"/>
+      <geom name="box_0_geom" type="box" size="0.5 0.5 0.3" mass="2.0"
+            rgba="0.553 0.553 0.553 1" conaffinity="1" condim="6" friction="0.2 0.005 0.0001"/>
+    </body>
+
+    <!-- Box 1: near SW door — #8d8d8d grey -->
+    <body name="box_1" pos="-1.3 -0.4 0.3">
+      <freejoint name="box_1_joint"/>
+      <geom name="box_1_geom" type="box" size="0.5 0.5 0.3" mass="2.0"
+            rgba="0.553 0.553 0.553 1" conaffinity="1" condim="6" friction="0.2 0.005 0.0001"/>
+    </body>
+
+    <!-- Box 2 (elongated): near NE door — #8d8d8d grey -->
+    <body name="box_2" pos="4.0 2.8 0.3">
+      <freejoint name="box_2_joint"/>
+      <geom name="box_2_geom" type="box" size="1.0 0.3 0.3" mass="2.5"
+            rgba="0.553 0.553 0.553 1" conaffinity="1" condim="6" friction="0.2 0.005 0.0001"/>
+    </body>
+
+    <!-- ══════════════ RAMPS ══════════════ -->
+
+    <!-- Ramp 0: proper wedge/triangular prism mesh, 0.85m tall back edge -->
+    <body name="ramp_0" pos="-3.0 -1.0 0.2883" euler="0 0 0">
+      <freejoint name="ramp_0_joint"/>
+      <geom name="ramp_0_geom" type="mesh" mesh="ramp_wedge_0"
+            mass="5.0" rgba="0.506 0.780 0.518 1"
+            conaffinity="1" condim="6" friction="0.8 0.01 0.001"/>
+    </body>
+
+  </worldbody>
+
+  <!-- ═══════════════════ ACTUATORS ═══════════════════ -->
+  <actuator>
+    <motor name="hider_0_x"  joint="hider_0_joint"  gear="50 0 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="hider_0_y"  joint="hider_0_joint"  gear="0 50 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="hider_1_x"  joint="hider_1_joint"  gear="50 0 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="hider_1_y"  joint="hider_1_joint"  gear="0 50 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="seeker_0_x" joint="seeker_0_joint"  gear="50 0 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="seeker_0_y" joint="seeker_0_joint"  gear="0 50 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="seeker_1_x" joint="seeker_1_joint"  gear="50 0 0 0 0 0" ctrlrange="-1.0 1.0"/>
+    <motor name="seeker_1_y" joint="seeker_1_joint"  gear="0 50 0 0 0 0" ctrlrange="-1.0 1.0"/>
+  </actuator>
+
+</mujoco>

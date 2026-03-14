@@ -1,0 +1,26 @@
+# Hide and Seek — Multi-Agent RL Project
+# Python dependencies
+
+# Core
+numpy>=1.24.0
+torch>=2.1.0
+
+# MuJoCo & Gymnasium
+mujoco>=3.1.0
+gymnasium>=1.0.0
+
+# Multi-Agent
+pettingzoo>=1.24.0
+
+# Visualization & Logging
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tensorboard>=2.14.0
+tqdm>=4.65.0
+
+# Video recording
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# Utilities
+pyyaml>=6.0
