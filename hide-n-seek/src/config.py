@@ -37,6 +37,13 @@ ENV_CONFIG = {
     "reward_type": "joint_zero_sum",   # 'selfish', 'joint_mean', 'joint_zero_sum'
     "reward_scale": 1.0,
 
+    # Reward shaping (small additive bonuses for learning on limited hardware)
+    "shape_prep_movement": 0.001,      # hider bonus per unit speed during prep
+    "shape_grab_and_move": 0.005,      # bonus for grabbing + moving an object
+    "shape_hider_near_cover": 0.010,   # hider bonus during prep if wall ≤ 1.5m
+    "shape_seeker_explore": 0.002,     # seeker bonus per metre moved (play phase)
+    "shape_individual_blend": 0.20,    # fraction of per-agent reward blended in
+
     # Actions
     "movement_scale": 1.0,        # max force applied per step
     "grab_radius": 0.8,           # radius to grab objects

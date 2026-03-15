@@ -76,6 +76,22 @@ _SEEN_RGBA = np.array([1.0, 0.2, 0.6, 1.0], dtype=np.float32)
 # Seekers frozen & blind during prep phase — dim grey to show inactive
 _PREP_RGBA = np.array([0.45, 0.45, 0.50, 0.6], dtype=np.float32)
 
+# ──────────────────────────────────────────────────────────
+# Reward shaping coefficients
+# ──────────────────────────────────────────────────────────
+# Small additive bonuses on top of the base binary reward to provide
+# a learning gradient for agents on single-GPU hardware.
+# All coefficients are intentionally small so the base game reward
+# dominates once agents learn to hide / seek.
+
+SHAPE_PREP_MOVEMENT   = 0.001   # hider bonus per unit speed during prep
+SHAPE_GRAB_AND_MOVE   = 0.005   # bonus per step for grabbing + moving an object
+SHAPE_HIDER_NEAR_COVER = 0.010  # hider bonus during prep if lidar sees wall ≤ 1.5m
+SHAPE_SEEKER_EXPLORE  = 0.002   # seeker bonus per metre moved during play phase
+SHAPE_INDIVIDUAL_BLEND = 0.20   # fraction of per-agent reward blended into team reward
+_COVER_LIDAR_THRESHOLD = 1.5 / 18.0  # 1.5m / lidar_max_dist (normalised)
+_GRAB_MOVE_VEL_THRESH  = 0.05  # min object velocity (m/step) to count as "moving"
+
 
 # ──────────────────────────────────────────────────────────
 # Helper: Ray-casting line-of-sight
@@ -559,27 +575,27 @@ class HideAndSeekEnv(gym.Env):
 
     def _compute_rewards(self, vis_matrix: NDArray) -> dict[str, float]:
         """
-        Compute per-agent rewards based on visibility during the play phase.
+        Compute per-agent rewards based on visibility + reward shaping.
 
-        During the preparation phase (seekers frozen) all agents receive 0 reward
-        — exactly matching OpenAI's original setup.
+        Base reward (joint_zero_sum):
+            Hiders: +1 if ALL hiders hidden, -1 otherwise.
+            Seekers: +1 if ANY seeker sees a hider, -1 otherwise.
 
-        Reward types:
-            joint_zero_sum:
-                Hiders: +1 if ALL hiders hidden, -1 otherwise.
-                Seekers: +1 if ANY seeker sees a hider, -1 otherwise.
-            joint_mean:
-                Each team receives the mean of individual rewards.
-            selfish:
-                Individual +1/-1 per agent.
+        Reward shaping (additive bonuses, always small):
+            1. Prep movement:  Hiders get a tiny bonus for moving during prep.
+            2. Grab & move:    Any agent gets a bonus for grabbing an object AND
+                               moving it (velocity > threshold).
+            3. Hider near cover: During prep, hiders get a bonus if any lidar
+                               ray detects a wall within 1.5 m.
+            4. Seeker explore:  During play, seekers get a bonus proportional
+                               to distance moved.
+            5. Individual blend: 20% of the reward is per-agent (gives gradient
+                               when one teammate hides but the other doesn't).
         """
         rewards = {name: 0.0 for name in AGENT_NAMES}
+        in_prep = self.current_step < self.prep_steps
 
-        # ── Prep phase: zero reward (OpenAI default) ──
-        if self.current_step < self.prep_steps:
-            return rewards
-
-        # ── Play phase ──
+        # ── Visibility analysis (always needed for shaping too) ──
         seeker_sees_hider = np.zeros(N_SEEKERS, dtype=bool)
         hider_is_seen = np.zeros(N_HIDERS, dtype=bool)
 
@@ -590,32 +606,114 @@ class HideAndSeekEnv(gym.Env):
                     seeker_sees_hider[si] = True
                     hider_is_seen[hi] = True
 
-        if self.reward_type == "joint_zero_sum":
+        # ── Current agent positions + velocities ──
+        agent_pos = {}
+        agent_speed = {}
+        for name in AGENT_NAMES:
+            pos = self._get_body_pos(self._agent_body_ids[name])[:2]
+            agent_pos[name] = pos
+            if name in self._prev_agent_pos:
+                displacement = np.linalg.norm(pos - self._prev_agent_pos[name])
+            else:
+                displacement = 0.0
+            agent_speed[name] = displacement
+
+        # ── Current object positions ──
+        cur_box_pos = np.zeros((MAX_BOXES, 2), dtype=np.float32)
+        box_moved = np.zeros(MAX_BOXES, dtype=np.float32)
+        for bi in range(self._cur_n_boxes):
+            bname = self._cur_box_names[bi]
+            cur_box_pos[bi] = self._get_body_pos(self._box_body_ids[bname])[:2]
+            box_moved[bi] = np.linalg.norm(cur_box_pos[bi] - self._prev_box_pos[bi])
+
+        cur_ramp_pos = np.zeros((MAX_RAMPS, 2), dtype=np.float32)
+        ramp_moved = np.zeros(MAX_RAMPS, dtype=np.float32)
+        for ri in range(self._cur_n_ramps):
+            rname = self._cur_ramp_names[ri]
+            cur_ramp_pos[ri] = self._get_body_pos(self._ramp_body_ids[rname])[:2]
+            ramp_moved[ri] = np.linalg.norm(cur_ramp_pos[ri] - self._prev_ramp_pos[ri])
+
+        # ──────────────────────────────────────────
+        # SHAPING 1: Hider movement during prep
+        # ──────────────────────────────────────────
+        if in_prep:
+            for hi in range(N_HIDERS):
+                name = HIDER_NAMES[hi]
+                rewards[name] += SHAPE_PREP_MOVEMENT * agent_speed[name]
+
+        # ──────────────────────────────────────────
+        # SHAPING 2: Grab + move objects (both teams)
+        # ──────────────────────────────────────────
+        for agent_idx, name in enumerate(AGENT_NAMES):
+            bonus = 0.0
+            # Check boxes grabbed by this agent
+            for bi in range(self._cur_n_boxes):
+                if self.box_grabbed_by[bi] == agent_idx and box_moved[bi] > _GRAB_MOVE_VEL_THRESH:
+                    bonus += SHAPE_GRAB_AND_MOVE
+            # Check ramps grabbed by this agent
+            for ri in range(self._cur_n_ramps):
+                if self.ramp_grabbed_by[ri] == agent_idx and ramp_moved[ri] > _GRAB_MOVE_VEL_THRESH:
+                    bonus += SHAPE_GRAB_AND_MOVE
+            rewards[name] += bonus
+
+        # ──────────────────────────────────────────
+        # SHAPING 3: Hider near cover during prep
+        # ──────────────────────────────────────────
+        if in_prep:
+            for hi in range(N_HIDERS):
+                name = HIDER_NAMES[hi]
+                body_id = self._agent_body_ids[name]
+                pos3d = self._get_body_pos(body_id)
+                lidar = _compute_lidar(
+                    self.model, self.data, pos3d,
+                    self.lidar_n_rays, self.lidar_max_dist,
+                    bodyexclude=body_id,
+                    exclude_geom_ids=self._all_agent_geom_ids,
+                )
+                # Any ray hitting a wall/box within threshold?
+                min_reading = float(np.min(lidar))
+                if min_reading < _COVER_LIDAR_THRESHOLD:
+                    rewards[name] += SHAPE_HIDER_NEAR_COVER
+
+        # ──────────────────────────────────────────
+        # SHAPING 4: Seeker exploration during play
+        # ──────────────────────────────────────────
+        if not in_prep:
+            for si in range(N_SEEKERS):
+                name = SEEKER_NAMES[si]
+                dist = agent_speed[name]
+                self._seeker_distance[si] += dist
+                rewards[name] += SHAPE_SEEKER_EXPLORE * dist
+
+        # ──────────────────────────────────────────
+        # BASE + INDIVIDUAL BLEND (play phase only)
+        # ──────────────────────────────────────────
+        if not in_prep:
             all_hidden = not np.any(hider_is_seen)
-            hider_rew = 1.0 if all_hidden else -1.0
             any_sees = np.any(seeker_sees_hider)
-            seeker_rew = 1.0 if any_sees else -1.0
 
-            for hi in range(N_HIDERS):
-                rewards[HIDER_NAMES[hi]] = hider_rew * self.reward_scale
-            for si in range(N_SEEKERS):
-                rewards[SEEKER_NAMES[si]] = seeker_rew * self.reward_scale
+            # Team-level base reward
+            team_hider_rew = 1.0 if all_hidden else -1.0
+            team_seeker_rew = 1.0 if any_sees else -1.0
 
-        elif self.reward_type == "joint_mean":
-            hider_rews = np.where(hider_is_seen, -1.0, 1.0)
-            seeker_rews = np.where(seeker_sees_hider, 1.0, -1.0)
-            hider_mean = float(hider_rews.mean())
-            seeker_mean = float(seeker_rews.mean())
+            # Per-agent individual reward (gives gradient)
             for hi in range(N_HIDERS):
-                rewards[HIDER_NAMES[hi]] = hider_mean * self.reward_scale
-            for si in range(N_SEEKERS):
-                rewards[SEEKER_NAMES[si]] = seeker_mean * self.reward_scale
+                indiv = 1.0 if not hider_is_seen[hi] else -1.0
+                blended = ((1.0 - SHAPE_INDIVIDUAL_BLEND) * team_hider_rew +
+                           SHAPE_INDIVIDUAL_BLEND * indiv)
+                rewards[HIDER_NAMES[hi]] += blended * self.reward_scale
 
-        elif self.reward_type == "selfish":
-            for hi in range(N_HIDERS):
-                rewards[HIDER_NAMES[hi]] = (-1.0 if hider_is_seen[hi] else 1.0) * self.reward_scale
             for si in range(N_SEEKERS):
-                rewards[SEEKER_NAMES[si]] = (1.0 if seeker_sees_hider[si] else -1.0) * self.reward_scale
+                indiv = 1.0 if seeker_sees_hider[si] else -1.0
+                blended = ((1.0 - SHAPE_INDIVIDUAL_BLEND) * team_seeker_rew +
+                           SHAPE_INDIVIDUAL_BLEND * indiv)
+                rewards[SEEKER_NAMES[si]] += blended * self.reward_scale
+
+        # ── Update tracking state for next step ──
+        for name in AGENT_NAMES:
+            self._prev_agent_pos[name] = agent_pos[name].copy()
+        self._prev_box_pos[:] = cur_box_pos
+        self._prev_ramp_pos[:] = cur_ramp_pos
 
         return rewards
 
@@ -851,8 +949,28 @@ class HideAndSeekEnv(gym.Env):
         self.ramp_grabbed_by[:] = -1
         self.current_step = 0
 
-        # Forward to get valid state
+        # ── Reward-shaping tracking state ──
+        # Previous agent positions (for movement / distance tracking)
         mujoco.mj_forward(self.model, self.data)
+        self._prev_agent_pos = {}
+        for name in AGENT_NAMES:
+            self._prev_agent_pos[name] = self._get_body_pos(
+                self._agent_body_ids[name])[:2].copy()
+        # Cumulative distance moved per seeker during play phase
+        self._seeker_distance = np.zeros(N_SEEKERS, dtype=np.float32)
+        # Previous box/ramp positions (for grab-and-move detection)
+        self._prev_box_pos = np.zeros((MAX_BOXES, 2), dtype=np.float32)
+        for bi in range(self._cur_n_boxes):
+            bname = self._cur_box_names[bi]
+            self._prev_box_pos[bi] = self._get_body_pos(
+                self._box_body_ids[bname])[:2]
+        self._prev_ramp_pos = np.zeros((MAX_RAMPS, 2), dtype=np.float32)
+        for ri in range(self._cur_n_ramps):
+            rname = self._cur_ramp_names[ri]
+            self._prev_ramp_pos[ri] = self._get_body_pos(
+                self._ramp_body_ids[rname])[:2]
+
+        # Forward already done above for position tracking
 
         vis_matrix = self._visibility_matrix()
         obs = {name: self._get_obs(i, vis_matrix) for i, name in enumerate(AGENT_NAMES)}
