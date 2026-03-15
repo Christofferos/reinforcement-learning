@@ -84,6 +84,9 @@ def evaluate(args):
             "hidden_dim": MAPPO_CONFIG["hidden_dim"],
             "n_layers": MAPPO_CONFIG["n_layers"],
             "use_feature_norm": MAPPO_CONFIG["use_feature_norm"],
+            "attn_embed_dim": MAPPO_CONFIG.get("attn_embed_dim", 128),
+            "attn_n_heads": MAPPO_CONFIG.get("attn_n_heads", 4),
+            "attn_n_layers": MAPPO_CONFIG.get("attn_n_layers", 2),
         }
 
         hider_policy = TeamPolicy("hiders", obs_dim, act_dim, global_state_dim,

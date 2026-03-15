@@ -559,16 +559,27 @@ class HideAndSeekEnv(gym.Env):
 
     def _compute_rewards(self, vis_matrix: NDArray) -> dict[str, float]:
         """
-        Compute rewards based on visibility.
-        - During prep phase: no visibility reward (all zero).
-        - During play phase: reward based on visibility.
+        Compute per-agent rewards based on visibility during the play phase.
+
+        During the preparation phase (seekers frozen) all agents receive 0 reward
+        — exactly matching OpenAI's original setup.
+
+        Reward types:
+            joint_zero_sum:
+                Hiders: +1 if ALL hiders hidden, -1 otherwise.
+                Seekers: +1 if ANY seeker sees a hider, -1 otherwise.
+            joint_mean:
+                Each team receives the mean of individual rewards.
+            selfish:
+                Individual +1/-1 per agent.
         """
         rewards = {name: 0.0 for name in AGENT_NAMES}
 
+        # ── Prep phase: zero reward (OpenAI default) ──
         if self.current_step < self.prep_steps:
             return rewards
 
-        # Seeker-to-hider visibility: seekers see hiders?
+        # ── Play phase ──
         seeker_sees_hider = np.zeros(N_SEEKERS, dtype=bool)
         hider_is_seen = np.zeros(N_HIDERS, dtype=bool)
 
@@ -580,10 +591,8 @@ class HideAndSeekEnv(gym.Env):
                     hider_is_seen[hi] = True
 
         if self.reward_type == "joint_zero_sum":
-            # Hiders: +1 if ALL hidden, -1 otherwise
             all_hidden = not np.any(hider_is_seen)
             hider_rew = 1.0 if all_hidden else -1.0
-            # Seekers: +1 if ANY sees a hider, -1 otherwise
             any_sees = np.any(seeker_sees_hider)
             seeker_rew = 1.0 if any_sees else -1.0
 

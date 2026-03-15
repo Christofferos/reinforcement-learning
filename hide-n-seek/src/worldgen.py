@@ -375,7 +375,7 @@ def _ramp_xml(idx: int, x: float, y: float, yaw: float = 0.0,
 
 # Minimum gap between an interior wall endpoint and another wall / arena edge.
 # This prevents pockets that trap agents.
-_WALL_GAP = 2.0
+_WALL_GAP = 1.2
 
 
 def _gen_layout(rng: Generator) -> dict:
@@ -393,8 +393,8 @@ def _gen_layout(rng: Generator) -> dict:
     - stops short of the other wall by at least _WALL_GAP metres.
     This guarantees agents always have a path around every wall.
     """
-    layout_type = rng.choice(["divider", "cross", "L_shape", "open"],
-                             p=[0.30, 0.30, 0.20, 0.20])
+    layout_type = rng.choice(["divider", "cross", "L_shape", "rooms"],
+                             p=[0.25, 0.25, 0.25, 0.25])
 
     walls = []  # list of (orientation, pos, start, end, [door_positions], door_width)
     A = ARENA_HALF  # 6.0
@@ -402,19 +402,19 @@ def _gen_layout(rng: Generator) -> dict:
     if layout_type == "divider":
         # ── Vertical wall from south edge to north edge ──
         vx = float(rng.uniform(-1.0, 3.0))
-        n_doors = int(rng.integers(1, 4))  # 1-3 doors
-        door_width = float(rng.uniform(2.0, 3.5))
+        n_doors = int(rng.integers(1, 3))  # 1-2 doors
+        door_width = float(rng.uniform(1.0, 2.0))
         door_ys = rng.uniform(-A + 1.5, A - 1.5, size=n_doors).tolist()
         walls.append(("v", vx, -A, A, door_ys, door_width))
 
         # Optional horizontal STUB in lower-left quadrant.
         # Runs from west arena edge but STOPS SHORT of the vertical wall.
-        if rng.random() < 0.5:
+        if rng.random() < 0.6:
             hy = float(rng.uniform(-A + 1.5, -0.5))
             stub_end = vx - _WALL_GAP      # guaranteed gap before vertical wall
             if stub_end > -A + 2.0:         # only if stub is long enough to matter
-                n_d = int(rng.integers(1, 3))
-                dw = float(rng.uniform(2.0, 3.0))
+                n_d = int(rng.integers(1, 2))
+                dw = float(rng.uniform(1.0, 1.8))
                 door_lo = -A + 1.0
                 door_hi = max(door_lo + 0.1, stub_end - 0.5)
                 dxs = rng.uniform(door_lo, door_hi, size=n_d).tolist()
@@ -422,12 +422,12 @@ def _gen_layout(rng: Generator) -> dict:
 
         # Optional horizontal STUB in upper-right quadrant.
         # Runs from vertical wall + gap to east arena edge.
-        if rng.random() < 0.4:
+        if rng.random() < 0.5:
             hy2 = float(rng.uniform(0.5, A - 1.5))
             stub_start = vx + _WALL_GAP    # guaranteed gap after vertical wall
             if stub_start < A - 2.0:
-                n_d2 = int(rng.integers(1, 3))
-                dw2 = float(rng.uniform(2.0, 3.0))
+                n_d2 = int(rng.integers(1, 2))
+                dw2 = float(rng.uniform(1.0, 1.8))
                 door_lo2 = stub_start + 0.5
                 door_hi2 = max(door_lo2 + 0.1, A - 1.0)
                 dxs2 = rng.uniform(door_lo2, door_hi2, size=n_d2).tolist()
@@ -442,14 +442,14 @@ def _gen_layout(rng: Generator) -> dict:
         # ── Two walls that NEVER touch ──
         # Vertical wall runs full height (south edge → north edge).
         vx = float(rng.uniform(-0.5, 2.0))
-        dw_v = float(rng.uniform(2.0, 3.5))
-        door_ys = rng.uniform(-A + 2.0, A - 2.0, size=int(rng.integers(1, 3))).tolist()
+        dw_v = float(rng.uniform(1.0, 2.0))
+        door_ys = rng.uniform(-A + 2.0, A - 2.0, size=int(rng.integers(1, 2))).tolist()
         walls.append(("v", vx, -A, A, door_ys, dw_v))
 
         # Horizontal wall is split into TWO stubs that each stop _WALL_GAP
         # before the vertical wall, leaving a clear corridor across the middle.
         hy = float(rng.uniform(-1.5, 1.5))
-        dw_h = float(rng.uniform(2.0, 3.5))
+        dw_h = float(rng.uniform(1.0, 2.0))
 
         # Left stub: west edge → (vx - _WALL_GAP)
         left_end = vx - _WALL_GAP
@@ -478,7 +478,7 @@ def _gen_layout(rng: Generator) -> dict:
 
         # Vertical wall runs from some midpoint up to north edge (not full height).
         vy_start = float(rng.uniform(-2.0, 0.0))  # starts in mid-arena
-        dw_v = float(rng.uniform(2.0, 3.0))
+        dw_v = float(rng.uniform(1.0, 1.8))
         door_ys = [float(rng.uniform(vy_start + 1.5, A - 1.5))]
         walls.append(("v", vx, vy_start, A, door_ys, dw_v))
 
@@ -486,7 +486,7 @@ def _gen_layout(rng: Generator) -> dict:
         hy = float(rng.uniform(vy_start - 1.5, vy_start + 0.5))
         h_end = vx - _WALL_GAP             # guaranteed gap before vertical wall
         if h_end > -A + 2.0:
-            dw_h = float(rng.uniform(2.0, 3.0))
+            dw_h = float(rng.uniform(1.0, 1.8))
             door_lo = -A + 1.0
             door_hi = max(door_lo + 0.1, h_end - 0.5)
             door_xs = [float(rng.uniform(door_lo, door_hi))]
@@ -496,9 +496,47 @@ def _gen_layout(rng: Generator) -> dict:
                         (-A + 0.5, vx - 0.5, -A + 0.5, hy - 1.0)]
         seeker_zones = [(-A + 0.5, vx - 0.5, hy + 1.0, A - 0.5)]
 
-    else:  # open
-        hider_zones = [(-A + 0.5, A - 0.5, -A + 0.5, -1.0)]
-        seeker_zones = [(-A + 0.5, A - 0.5, 1.0, A - 0.5)]
+    else:  # rooms — two perpendicular walls creating 3-4 enclosed areas
+        # ── Vertical wall from south to north edge ──
+        vx = float(rng.uniform(-1.0, 2.0))
+        dw_v = float(rng.uniform(1.0, 1.6))
+        door_ys_v = rng.uniform(-A + 2.0, A - 2.0, size=int(rng.integers(1, 2))).tolist()
+        walls.append(("v", vx, -A, A, door_ys_v, dw_v))
+
+        # ── Horizontal wall from west to east edge (crosses vertical wall) ──
+        hy = float(rng.uniform(-1.5, 1.5))
+        dw_h = float(rng.uniform(1.0, 1.6))
+
+        # Left stub: west edge → (vx - _WALL_GAP)
+        left_end = vx - _WALL_GAP
+        if left_end > -A + 1.5:
+            door_lo = -A + 1.0
+            door_hi = max(door_lo + 0.1, left_end - 0.5)
+            door_xs_L = [float(rng.uniform(door_lo, door_hi))]
+            walls.append(("h", hy, -A, left_end, door_xs_L, dw_h))
+
+        # Right stub: (vx + _WALL_GAP) → east edge
+        right_start = vx + _WALL_GAP
+        if right_start < A - 1.5:
+            door_lo_R = right_start + 0.5
+            door_hi_R = max(door_lo_R + 0.1, A - 1.0)
+            door_xs_R = [float(rng.uniform(door_lo_R, door_hi_R))]
+            walls.append(("h", hy, right_start, A, door_xs_R, dw_h))
+
+        # ── Optional extra stub for a 5th pocket ──
+        if rng.random() < 0.5:
+            extra_vx = float(rng.uniform(vx + 2.5, A - 1.0))
+            if extra_vx < A - 1.0:
+                extra_vy_start = hy + _WALL_GAP
+                if extra_vy_start < A - 2.0:
+                    dw_e = float(rng.uniform(1.0, 1.5))
+                    door_ys_e = [float(rng.uniform(extra_vy_start + 1.0, A - 1.0))]
+                    walls.append(("v", extra_vx, extra_vy_start, A, door_ys_e, dw_e))
+
+        hider_zones = [(vx + 1.0, A - 0.5, -A + 0.5, hy - 0.5),
+                        (-A + 0.5, vx - 0.5, -A + 0.5, hy - 0.5)]
+        seeker_zones = [(-A + 0.5, vx - 0.5, hy + 0.5, A - 0.5),
+                        (vx + 1.0, A - 0.5, hy + 0.5, A - 0.5)]
 
     return {
         "walls": walls,

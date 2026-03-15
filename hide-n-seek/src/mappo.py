@@ -6,6 +6,12 @@ Centralized Training with Decentralized Execution (CTDE).
 Each *team* shares a single policy (hiders share one, seekers share another).
 The critic receives the full global state; the actor sees only local observations.
 
+The actor uses an **entity-centric attention** architecture (like OpenAI's
+original paper): self-state is embedded, each entity (other agent / box / ramp)
+is embedded separately, then a masked multi-head self-attention block pools
+entity information before producing action outputs.  Lidar goes through a
+small 1-D conv encoder and is concatenated after the attention block.
+
 References:
     Yu et al. "The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games" (2021)
     Baker et al. "Emergent Tool Use From Multi-Agent Autocurricula" (2019)
@@ -13,6 +19,7 @@ References:
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,7 +28,24 @@ from torch.distributions import Normal
 
 
 # ──────────────────────────────────────────────────────────
-# Networks
+# Observation layout constants  (must stay in sync with env.py)
+# ──────────────────────────────────────────────────────────
+
+_SELF_DIM = 9          # pos(3) + vel(3) + is_hider(1) + prep(1) + prep_rem(1)
+_OTHER_AGENT_DIM = 8   # rel_pos(3) + rel_vel(3) + visible(1) + is_hider(1)
+_N_OTHER_AGENTS = 3    # N_AGENTS - 1
+_BOX_DIM = 5           # rel_pos(3) + grabbed(1) + exists(1)
+_MAX_BOXES = 5
+_RAMP_DIM = 5          # rel_pos(3) + grabbed(1) + exists(1)
+_MAX_RAMPS = 2
+_LIDAR_RAYS = 30
+
+# Total obs dim = 9 + 3*8 + 5*5 + 2*5 + 30 = 98
+_ENTITY_TOTAL = _N_OTHER_AGENTS + _MAX_BOXES + _MAX_RAMPS   # 10 entities
+
+
+# ──────────────────────────────────────────────────────────
+# Init helper
 # ──────────────────────────────────────────────────────────
 
 def _init_weights(module: nn.Module, gain: float = np.sqrt(2)):
@@ -32,39 +56,229 @@ def _init_weights(module: nn.Module, gain: float = np.sqrt(2)):
             nn.init.constant_(module.bias, 0.0)
 
 
-class ActorNetwork(nn.Module):
+# ──────────────────────────────────────────────────────────
+# Entity-centric Actor  (attention-based, like OpenAI)
+# ──────────────────────────────────────────────────────────
+
+class EntityAttentionBlock(nn.Module):
     """
-    Gaussian policy for continuous actions.
-    Decentralised — takes only the agent's local observation.
+    Single masked multi-head self-attention block over entities.
+    Similar to a Transformer encoder layer but operates over entity slots
+    rather than sequence positions.
     """
 
-    def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 256,
-                 n_layers: int = 2, use_feature_norm: bool = True):
+    def __init__(self, embed_dim: int, n_heads: int = 4, dropout: float = 0.0):
         super().__init__()
+        assert embed_dim % n_heads == 0
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        self.scale = math.sqrt(self.head_dim)
 
+        self.qkv = nn.Linear(embed_dim, 3 * embed_dim)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.ln1 = nn.LayerNorm(embed_dim)
+        self.ln2 = nn.LayerNorm(embed_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
+        """
+        Args:
+            x:    (B, N_entities, embed_dim)
+            mask: (B, N_entities) — True = valid, False = masked out
+        Returns:
+            (B, N_entities, embed_dim)
+        """
+        B, N, D = x.shape
+
+        # Self-attention with residual
+        residual = x
+        x = self.ln1(x)
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = (q @ k.transpose(-2, -1)) / self.scale  # (B, heads, N, N)
+
+        if mask is not None:
+            # mask shape: (B, N) -> (B, 1, 1, N) for key masking
+            key_mask = mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, N)
+            attn = attn.masked_fill(~key_mask, float('-inf'))
+
+        attn = torch.softmax(attn, dim=-1)
+        attn = attn.nan_to_num(0.0)  # if all keys masked, softmax → nan → 0
+
+        out = (attn @ v).transpose(1, 2).reshape(B, N, D)
+        x = residual + self.proj(out)
+
+        # FFN with residual
+        x = x + self.mlp(self.ln2(x))
+        return x
+
+
+class EntityActorNetwork(nn.Module):
+    """
+    Entity-centric actor with masked self-attention (OpenAI-style).
+
+    Observation is split into:
+      - self_obs (9-dim) → embedded
+      - 3 other agents (8-dim each) → each embedded independently
+      - 5 boxes (5-dim each) → each embedded independently
+      - 2 ramps (5-dim each) → each embedded independently
+      - 30 lidar rays → small 1-D conv encoder
+
+    All entity embeddings go through a self-attention block, then are
+    mean-pooled (valid entities only) and concatenated with the self
+    embedding + lidar features to produce the action.
+    """
+
+    def __init__(self, obs_dim: int, act_dim: int, embed_dim: int = 128,
+                 n_attn_heads: int = 4, n_attn_layers: int = 2,
+                 use_feature_norm: bool = True):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.embed_dim = embed_dim
+
+        # Feature norm on the full flat obs
         self.use_feature_norm = use_feature_norm
         if use_feature_norm:
             self.feature_norm = nn.LayerNorm(obs_dim)
 
-        layers = []
-        in_dim = obs_dim
-        for _ in range(n_layers):
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.Tanh())
-            in_dim = hidden_dim
-        self.trunk = nn.Sequential(*layers)
+        # Entity embedders (project each entity type to embed_dim)
+        self.self_embed = nn.Sequential(
+            nn.Linear(_SELF_DIM, embed_dim), nn.Tanh())
+        self.agent_embed = nn.Sequential(
+            nn.Linear(_OTHER_AGENT_DIM, embed_dim), nn.Tanh())
+        self.box_embed = nn.Sequential(
+            nn.Linear(_BOX_DIM, embed_dim), nn.Tanh())
+        self.ramp_embed = nn.Sequential(
+            nn.Linear(_RAMP_DIM, embed_dim), nn.Tanh())
 
-        self.mean_head = nn.Linear(hidden_dim, act_dim)
-        self.log_std = nn.Parameter(torch.zeros(act_dim))  # learnable per-dim
+        # Lidar encoder: 1-D conv → small feature vector
+        self.lidar_encoder = nn.Sequential(
+            nn.Linear(_LIDAR_RAYS, 64),
+            nn.Tanh(),
+            nn.Linear(64, 32),
+            nn.Tanh(),
+        )
+        _lidar_out = 32
 
+        # Attention blocks over entities (self + agents + boxes + ramps)
+        self.n_entities = 1 + _N_OTHER_AGENTS + _MAX_BOXES + _MAX_RAMPS  # 11
+        self.attn_layers = nn.ModuleList([
+            EntityAttentionBlock(embed_dim, n_heads=n_attn_heads)
+            for _ in range(n_attn_layers)
+        ])
+
+        # Final MLP: pooled entity features + self embed + lidar → action
+        # We concatenate: self_embed(128) + pooled(128) + lidar(32) = 288
+        final_in = embed_dim + embed_dim + _lidar_out
+        self.final_mlp = nn.Sequential(
+            nn.Linear(final_in, embed_dim),
+            nn.Tanh(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.Tanh(),
+        )
+
+        self.mean_head = nn.Linear(embed_dim, act_dim)
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+
+        # Init
         self.apply(lambda m: _init_weights(m, gain=np.sqrt(2)))
         _init_weights(self.mean_head, gain=0.01)
+
+    def _parse_obs(self, obs: torch.Tensor):
+        """
+        Split flat observation (B, 98) into entity components.
+
+        Returns:
+            self_obs:  (B, 9)
+            agents:    (B, 3, 8)
+            boxes:     (B, 5, 5)
+            ramps:     (B, 2, 5)
+            lidar:     (B, 30)
+            box_mask:  (B, 5)  — True if box exists
+            ramp_mask: (B, 2)  — True if ramp exists
+        """
+        B = obs.shape[0]
+        idx = 0
+
+        self_obs = obs[:, idx:idx + _SELF_DIM]
+        idx += _SELF_DIM
+
+        agents = obs[:, idx:idx + _N_OTHER_AGENTS * _OTHER_AGENT_DIM]
+        agents = agents.reshape(B, _N_OTHER_AGENTS, _OTHER_AGENT_DIM)
+        idx += _N_OTHER_AGENTS * _OTHER_AGENT_DIM
+
+        boxes = obs[:, idx:idx + _MAX_BOXES * _BOX_DIM]
+        boxes = boxes.reshape(B, _MAX_BOXES, _BOX_DIM)
+        idx += _MAX_BOXES * _BOX_DIM
+
+        ramps = obs[:, idx:idx + _MAX_RAMPS * _RAMP_DIM]
+        ramps = ramps.reshape(B, _MAX_RAMPS, _RAMP_DIM)
+        idx += _MAX_RAMPS * _RAMP_DIM
+
+        lidar = obs[:, idx:idx + _LIDAR_RAYS]
+
+        # Masks: "exists" flag is the last element of each entity
+        box_mask = boxes[:, :, -1] > 0.5   # (B, 5)
+        ramp_mask = ramps[:, :, -1] > 0.5  # (B, 2)
+
+        return self_obs, agents, boxes, ramps, lidar, box_mask, ramp_mask
 
     def forward(self, obs: torch.Tensor):
         if self.use_feature_norm:
             obs = self.feature_norm(obs)
-        x = self.trunk(obs)
-        mean = self.mean_head(x)
+
+        self_obs, agents, boxes, ramps, lidar, box_mask, ramp_mask = \
+            self._parse_obs(obs)
+
+        B = obs.shape[0]
+
+        # Embed each entity type
+        self_emb = self.self_embed(self_obs).unsqueeze(1)       # (B, 1, D)
+        agent_emb = self.agent_embed(agents)                     # (B, 3, D)
+        box_emb = self.box_embed(boxes)                          # (B, 5, D)
+        ramp_emb = self.ramp_embed(ramps)                        # (B, 2, D)
+
+        # Stack all entities: [self, agents..., boxes..., ramps...]
+        all_entities = torch.cat([self_emb, agent_emb, box_emb, ramp_emb], dim=1)
+        # (B, 11, D)
+
+        # Build attention mask: self + agents are always valid;
+        # boxes/ramps only if they exist
+        self_mask = torch.ones(B, 1, device=obs.device, dtype=torch.bool)
+        agent_mask = torch.ones(B, _N_OTHER_AGENTS, device=obs.device, dtype=torch.bool)
+        entity_mask = torch.cat([self_mask, agent_mask, box_mask, ramp_mask], dim=1)
+        # (B, 11)
+
+        # Self-attention
+        x = all_entities
+        for attn_layer in self.attn_layers:
+            x = attn_layer(x, mask=entity_mask)
+
+        # Masked mean pooling over all entities (excluding self — index 0)
+        other_entities = x[:, 1:, :]                             # (B, 10, D)
+        other_mask = entity_mask[:, 1:].unsqueeze(-1).float()    # (B, 10, 1)
+        pooled = (other_entities * other_mask).sum(dim=1) / (other_mask.sum(dim=1).clamp(min=1))
+        # (B, D)
+
+        # Self embedding from attention output
+        self_out = x[:, 0, :]  # (B, D)
+
+        # Lidar features
+        lidar_feat = self.lidar_encoder(lidar)  # (B, 32)
+
+        # Final MLP
+        combined = torch.cat([self_out, pooled, lidar_feat], dim=-1)
+        features = self.final_mlp(combined)
+
+        mean = self.mean_head(features)
         std = self.log_std.exp().expand_as(mean)
         return Normal(mean, std)
 
@@ -75,7 +289,6 @@ class ActorNetwork(nn.Module):
         else:
             action = dist.rsample()
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        # Clip (not tanh) to [-1, 1] — avoids Jacobian correction issues
         action = torch.clamp(action, -1.0, 1.0)
         return action, log_prob
 
@@ -90,6 +303,7 @@ class CriticNetwork(nn.Module):
     """
     Centralised value function.
     Takes the full global state as input.
+    Uses a standard MLP (global state is already a compact summary).
     """
 
     def __init__(self, state_dim: int, hidden_dim: int = 256,
@@ -239,7 +453,13 @@ class TeamPolicy:
         use_feature_norm = config.get("use_feature_norm", True)
 
         # Networks
-        self.actor = ActorNetwork(obs_dim, act_dim, hidden_dim, n_layers, use_feature_norm).to(self.device)
+        self.actor = EntityActorNetwork(
+            obs_dim, act_dim,
+            embed_dim=config.get("attn_embed_dim", 128),
+            n_attn_heads=config.get("attn_n_heads", 4),
+            n_attn_layers=config.get("attn_n_layers", 2),
+            use_feature_norm=use_feature_norm,
+        ).to(self.device)
         self.critic = CriticNetwork(global_state_dim, hidden_dim, n_layers, use_feature_norm).to(self.device)
 
         lr_actor = config.get("lr_actor", 3e-4)
@@ -267,6 +487,34 @@ class TeamPolicy:
             action.squeeze(0).cpu().numpy(),
             log_prob.squeeze(0).item(),
             value.squeeze(0).item(),
+        )
+
+    def select_actions_batch(self, obs_batch: np.ndarray, state_batch: np.ndarray,
+                             deterministic: bool = False):
+        """
+        Batched action selection — pass N observations through the network in
+        a single forward call instead of N individual calls.
+
+        Args:
+            obs_batch:   (N, obs_dim)   numpy array
+            state_batch: (N, state_dim) numpy array
+
+        Returns:
+            actions:   (N, act_dim)  numpy array
+            log_probs: (N,)          numpy array
+            values:    (N,)          numpy array
+        """
+        obs_t = torch.FloatTensor(obs_batch).to(self.device)
+        state_t = torch.FloatTensor(state_batch).to(self.device)
+
+        with torch.no_grad():
+            actions, log_probs = self.actor.get_action(obs_t, deterministic=deterministic)
+            values = self.critic(state_t)
+
+        return (
+            actions.cpu().numpy(),
+            log_probs.squeeze(-1).cpu().numpy(),
+            values.squeeze(-1).cpu().numpy(),
         )
 
     def store_transition(self, buffer_key, obs, global_state, action,

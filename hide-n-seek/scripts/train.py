@@ -178,6 +178,10 @@ def train(args):
         "use_feature_norm": MAPPO_CONFIG["use_feature_norm"],
         "lr_actor": args.lr_actor,
         "lr_critic": args.lr_critic,
+        # Entity-attention actor config
+        "attn_embed_dim": MAPPO_CONFIG.get("attn_embed_dim", 128),
+        "attn_n_heads": MAPPO_CONFIG.get("attn_n_heads", 4),
+        "attn_n_layers": MAPPO_CONFIG.get("attn_n_layers", 2),
     }
 
     # ── One shared policy per team ──
@@ -301,6 +305,8 @@ def train(args):
 
     for round_num in pbar:
       try:
+        round_t0 = time.time()
+
         # Reset all envs at the start of each round
         all_obs, all_info = vec_env.reset()
         all_global_states = [info["global_state"] for info in all_info]
@@ -312,20 +318,52 @@ def train(args):
         ]
 
         # Run for exactly `horizon` steps (all envs in lockstep)
+        # Pre-compute team membership indices for fast slicing
+        n_hiders = len(HIDER_NAMES)
+        n_seekers = len(SEEKER_NAMES)
+
         for step in range(args.horizon):
-            # Collect actions from all envs x all agents
+            # ── Batched action selection ──
+            # Stack obs for each team across ALL envs into (n_envs*n_team, obs_dim)
+            hider_obs_list = []
+            hider_state_list = []
+            seeker_obs_list = []
+            seeker_state_list = []
+
+            for ei in range(n_envs):
+                gs = all_global_states[ei]
+                for name in HIDER_NAMES:
+                    hider_obs_list.append(all_obs[ei][name])
+                    hider_state_list.append(gs)
+                for name in SEEKER_NAMES:
+                    seeker_obs_list.append(all_obs[ei][name])
+                    seeker_state_list.append(gs)
+
+            hider_obs_batch = np.stack(hider_obs_list, axis=0)    # (n_envs*n_hiders, obs_dim)
+            hider_state_batch = np.stack(hider_state_list, axis=0)
+            seeker_obs_batch = np.stack(seeker_obs_list, axis=0)   # (n_envs*n_seekers, obs_dim)
+            seeker_state_batch = np.stack(seeker_state_list, axis=0)
+
+            # Two batched GPU calls instead of n_envs * n_agents individual calls
+            h_actions, h_log_probs, h_values = hider_policy.select_actions_batch(
+                hider_obs_batch, hider_state_batch, deterministic=False)
+            s_actions, s_log_probs, s_values = seeker_policy.select_actions_batch(
+                seeker_obs_batch, seeker_state_batch, deterministic=False)
+
+            # Unpack into per-env action dicts for vec_env.step()
             all_actions = [{} for _ in range(n_envs)]
+            # Also store per-agent data for buffer insertion
             all_action_data = [{} for _ in range(n_envs)]
 
             for ei in range(n_envs):
-                for name in AGENT_NAMES:
-                    policy = get_policy(name)
-                    action, log_prob, value = policy.select_action(
-                        all_obs[ei][name], all_global_states[ei],
-                        deterministic=False,
-                    )
-                    all_actions[ei][name] = action
-                    all_action_data[ei][name] = (action, log_prob, value)
+                for hi, name in enumerate(HIDER_NAMES):
+                    idx = ei * n_hiders + hi
+                    all_actions[ei][name] = h_actions[idx]
+                    all_action_data[ei][name] = (h_actions[idx], h_log_probs[idx], h_values[idx])
+                for si, name in enumerate(SEEKER_NAMES):
+                    idx = ei * n_seekers + si
+                    all_actions[ei][name] = s_actions[idx]
+                    all_action_data[ei][name] = (s_actions[idx], s_log_probs[idx], s_values[idx])
 
             # Step all envs
             next_all_obs, all_rewards, all_terminated, all_truncated, all_info = \
@@ -355,6 +393,14 @@ def train(args):
 
         # ── Round complete: all envs finished 1 episode ──
         total_episodes += n_envs
+        round_dt = time.time() - round_t0
+        round_steps = n_envs * args.horizon  # total agent-steps this round
+
+        if round_num <= 3:
+            sps = round_steps / max(round_dt, 1e-6)
+            print(f"\n  [PERF] Round {round_num}: {round_dt:.1f}s "
+                  f"({sps:.0f} env-steps/s, "
+                  f"{n_envs * args.horizon * 4 / max(round_dt, 1e-6):.0f} agent-steps/s)")
 
         # ── Update policies (with N x more data than before) ──
         hider_stats = hider_policy.update()
@@ -393,6 +439,8 @@ def train(args):
         writer.add_scalar("episode/total_episodes", total_episodes, round_num)
         writer.add_scalar("episode/total_steps", total_steps, round_num)
         writer.add_scalar("lr/actor", hider_actor_scheduler.get_last_lr()[0], round_num)
+        writer.add_scalar("perf/round_time_s", round_dt, round_num)
+        writer.add_scalar("perf/steps_per_sec", round_steps / max(round_dt, 1e-6), round_num)
 
         if hider_stats:
             writer.add_scalar("loss/hider_policy", hider_stats["policy_loss"], total_episodes)
@@ -412,6 +460,8 @@ def train(args):
                 "S": f"{run_s:.1f}",
                 "ep": total_episodes,
                 "steps": f"{total_steps/1e6:.2f}M",
+                "s/rnd": f"{round_dt:.1f}",
+                "sps": f"{round_steps / max(round_dt, 1e-6):.0f}",
             })
 
         # Save checkpoints

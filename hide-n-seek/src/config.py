@@ -49,7 +49,7 @@ MAPPO_CONFIG = {
     "gamma": 0.998,
     "gae_lambda": 0.95,
     "clip_epsilon": 0.2,
-    "entropy_coef": 0.02,
+    "entropy_coef": 0.05,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
 
@@ -57,18 +57,23 @@ MAPPO_CONFIG = {
     "lr_actor": 3e-4,
     "lr_critic": 1e-3,
 
-    # Network
+    # Network (MLP critic)
     "hidden_dim": 256,
     "n_layers": 2,
     "use_orthogonal_init": True,
     "use_feature_norm": True,
+
+    # Network (Entity-attention actor — OpenAI-style)
+    "attn_embed_dim": 128,
+    "attn_n_heads": 4,
+    "attn_n_layers": 2,
 
     # Training
     "n_rollout_steps": 240,       # steps per rollout (= 1 episode)
     "ppo_epochs": 10,
     "mini_batch_size": 256,
     "n_total_steps": 50_000_000,  # total environment steps
-    "n_envs": 8,                  # parallel environments
+    "n_envs": 32,                  # parallel environments
 
     # Shared policy per team
     "share_policy_within_team": True,
