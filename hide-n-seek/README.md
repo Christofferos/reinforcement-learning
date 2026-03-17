@@ -1,5 +1,54 @@
 # 🔍 Hide and Seek — Multi-Agent Reinforcement Learning
 
+## 🚀 Quick Start
+
+### 1. Install dependencies
+
+```bash
+# Create virtual environment (recommended)
+python -m venv venv
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # Linux/Mac
+
+# Install
+pip install -r requirements.txt
+```
+
+### 2. Smoke tests
+
+```bash
+# Headless (no window)
+python tests/random_test.py 
+
+# With MuJoCo viewer
+python tests/random_test.py --render
+```
+
+### 3. Train
+
+```bash
+# Resume previous training
+python scripts/train.py --resume models/hideseek_mappo_20260316_232845
+
+# Start new custom training
+python scripts/train.py --device cpu --n_envs 16 --n_episodes 10000 --log_interval 10 2>&1
+```
+
+### 4. Monitor
+```bash
+tensorboard --logdir runs/
+```
+
+### 5. Evaluate
+
+```bash
+# Evaluate trained model
+python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --checkpoint ep20000 --n_episodes 5 --slow
+
+# Record trained model
+python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --record --checkpoint ep20000 --n_episodes 5 --slow
+```
+
 A modern recreation of OpenAI's **"Emergent Tool Use From Multi-Agent Autocurricula"** (2019), built with current open-source tooling.
 
 <p align="center">
@@ -71,62 +120,6 @@ hide-n-seek/
 ├── requirements.txt             # Python dependencies
 ├── .gitignore
 └── README.md
-```
-
-## 🚀 Quick Start
-
-### 1. Install dependencies
-
-```bash
-# Create virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  # Windows
-
-# Install
-pip install -r requirements.txt
-```
-
-### 2. Sanity check
-
-```bash
-# Headless (no window)
-python tests/random_test.py
-
-# With MuJoCo viewer
-python tests/random_test.py --render
-```
-
-### 3. Train
-
-```bash
-# Basic training
-python scripts/train.py
-
-# With visualization
-python scripts/train.py --render
-
-# Custom hyperparameters
-python scripts/train.py --n_episodes 50000 --device cuda --hidden_dim 512
-
-# Common
-python scripts/train.py --device cpu --n_envs 16 --n_episodes 10000 --log_interval 10 2>&1
-
-# Monitor with TensorBoard
-tensorboard --logdir runs/
-```
-
-### 4. Evaluate
-
-```bash
-# Evaluate trained model
-python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX
-
-# Common
-python scripts/evaluate.py --model_dir models/hideseek_mappo_20260316_151047 --checkpoint ep3500 --n_episodes 5 --slow
-
-# Record video
-python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --record
 ```
 
 ## 🧠 Key Design Decisions
