@@ -109,6 +109,9 @@ python scripts/train.py --render
 # Custom hyperparameters
 python scripts/train.py --n_episodes 50000 --device cuda --hidden_dim 512
 
+# Common
+python scripts/train.py --device cpu --n_envs 16 --n_episodes 10000 --log_interval 10 2>&1
+
 # Monitor with TensorBoard
 tensorboard --logdir runs/
 ```
@@ -118,6 +121,9 @@ tensorboard --logdir runs/
 ```bash
 # Evaluate trained model
 python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX
+
+# Common
+python scripts/evaluate.py --model_dir models/hideseek_mappo_20260316_151047 --checkpoint ep3500 --n_episodes 5 --slow
 
 # Record video
 python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --record

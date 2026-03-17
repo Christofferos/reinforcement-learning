@@ -49,6 +49,8 @@ def parse_args():
     parser.add_argument("--horizon", type=int, default=ENV_CONFIG["horizon"],
                         help="Steps per episode (default from config)")
     parser.add_argument("--random", action="store_true", help="Use random actions")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Load a specific checkpoint, e.g. 'ep3500' or 'crash'")
     parser.add_argument("--record", action="store_true", help="Record video")
     parser.add_argument("--slow", action="store_true",
                         help="Slow-motion playback (adds delay between steps)")
@@ -94,8 +96,12 @@ def evaluate(args):
         seeker_policy = TeamPolicy("seekers", obs_dim, act_dim, global_state_dim,
                                    policy_config, device=args.device)
 
-        hider_path = os.path.join(args.model_dir, "best_hider_policy.pt")
-        seeker_path = os.path.join(args.model_dir, "best_seeker_policy.pt")
+        if args.checkpoint:
+            hider_path = os.path.join(args.model_dir, f"hider_policy_{args.checkpoint}.pt")
+            seeker_path = os.path.join(args.model_dir, f"seeker_policy_{args.checkpoint}.pt")
+        else:
+            hider_path = os.path.join(args.model_dir, "best_hider_policy.pt")
+            seeker_path = os.path.join(args.model_dir, "best_seeker_policy.pt")
 
         if os.path.exists(hider_path):
             hider_policy.load(hider_path)

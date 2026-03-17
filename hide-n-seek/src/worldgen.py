@@ -127,7 +127,8 @@ _SEEKER_RGBA = "0.937 0.325 0.314 1"
 _XML_HEADER = """\
 <mujoco model="hide_and_seek_procgen">
   <compiler angle="radian" coordinate="local" inertiafromgeom="true"/>
-  <option timestep="0.02" gravity="0 0 -9.81" integrator="Euler">
+  <option timestep="0.02" gravity="0 0 -9.81" integrator="implicitfast"
+          solver="Newton" iterations="30" tolerance="1e-8" impratio="10">
     <flag warmstart="enable"/>
   </option>
   <default>

@@ -37,12 +37,20 @@ ENV_CONFIG = {
     "reward_type": "joint_zero_sum",   # 'selfish', 'joint_mean', 'joint_zero_sum'
     "reward_scale": 1.0,
 
-    # Reward shaping (small additive bonuses for learning on limited hardware)
-    "shape_prep_movement": 0.001,      # hider bonus per unit speed during prep
-    "shape_grab_and_move": 0.005,      # bonus for grabbing + moving an object
-    "shape_hider_near_cover": 0.010,   # hider bonus during prep if wall ≤ 1.5m
-    "shape_seeker_explore": 0.002,     # seeker bonus per metre moved (play phase)
-    "shape_individual_blend": 0.20,    # fraction of per-agent reward blended in
+    # Reward shaping (strong gradient bonuses for limited-compute training)
+    "shape_prep_movement": 0.005,      # hider bonus per unit speed during prep
+    "shape_grab_and_move": 0.01,       # bonus for grabbing + moving an object
+    "shape_hider_near_cover": 0.02,    # hider bonus during prep if wall ≤ 2m
+    "shape_prep_near_object": 0.01,    # hider bonus during prep if near box/ramp
+    "shape_hider_dist_from_seeker": 0.05,  # hider play bonus: flee from seekers
+    "shape_hider_occluded": 0.03,      # hider play bonus per blocked seeker LOS
+    "shape_hider_seen_proximity": 0.05,# hider play penalty when seen (scaled by closeness)
+    "shape_hider_move_when_seen": 0.02,# hider play bonus for moving while visible
+    "shape_seeker_dist_to_hider": 0.05,# seeker play bonus: chase hiders
+    "shape_seeker_coverage": 0.03,     # seeker bonus per new 2m×2m cell visited
+    "shape_seeker_team_coverage": 0.02,# extra bonus when cell is new for whole team
+    "shape_seeker_center_post_prep": 0.03, # seeker bonus for approaching center after prep
+    "shape_individual_blend": 0.25,    # fraction of per-agent reward blended in
 
     # Actions
     "movement_scale": 1.0,        # max force applied per step
@@ -53,16 +61,16 @@ ENV_CONFIG = {
 
 MAPPO_CONFIG = {
     # PPO core
-    "gamma": 0.998,
+    "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_epsilon": 0.2,
-    "entropy_coef": 0.05,
+    "entropy_coef": 0.01,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
 
     # Learning rates
-    "lr_actor": 3e-4,
-    "lr_critic": 1e-3,
+    "lr_actor": 5e-4,
+    "lr_critic": 5e-4,
 
     # Network (MLP critic)
     "hidden_dim": 256,
@@ -86,8 +94,8 @@ MAPPO_CONFIG = {
     "share_policy_within_team": True,
 
     # Logging
-    "log_interval": 10,           # episodes between logs
-    "save_interval": 500,         # episodes between checkpoints
+    "log_interval": 10,           # rounds between log prints
+    "save_interval": 500,         # episodes between checkpoints (~15 rounds, ~15 min)
     "eval_interval": 100,
     "eval_episodes": 10,
     "log_dir": "runs",

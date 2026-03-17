@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import glob
 import argparse
 import platform
 import ctypes
@@ -86,8 +87,10 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
     # Logging
-    parser.add_argument("--log_interval", type=int, default=MAPPO_CONFIG["log_interval"])
-    parser.add_argument("--save_interval", type=int, default=MAPPO_CONFIG["save_interval"])
+    parser.add_argument("--log_interval", type=int, default=MAPPO_CONFIG["log_interval"],
+                        help="Rounds between progress-bar updates")
+    parser.add_argument("--save_interval", type=int, default=MAPPO_CONFIG["save_interval"],
+                        help="Episodes between checkpoint saves (e.g. 5000 → ep5000, ep10000, ...)")
     parser.add_argument("--log_dir", type=str, default=MAPPO_CONFIG["log_dir"])
     parser.add_argument("--save_dir", type=str, default=MAPPO_CONFIG["save_dir"])
 
@@ -223,9 +226,46 @@ def train(args):
             total_episodes = ep_num
             total_steps = ep_num * args.horizon
             print(f"  [>>] Resumed from {latest_hider}")
-            print(f"     Starting at round {start_round}, episode {total_episodes}")
+            print(f"       Starting at round {start_round}, episode {total_episodes}")
         else:
-            print(f"  [!]  No checkpoints found in {args.resume}, starting fresh")
+            # Try crash checkpoint first (most recent state before CUDA death)
+            crash_h = os.path.join(args.resume, "crash_hider_policy.pt")
+            crash_s = os.path.join(args.resume, "crash_seeker_policy.pt")
+            crash_meta = os.path.join(args.resume, "crash_meta.txt")
+            best_h = os.path.join(args.resume, "best_hider_policy.pt")
+            best_s = os.path.join(args.resume, "best_seeker_policy.pt")
+
+            if os.path.exists(crash_h) and os.path.exists(crash_s):
+                hider_policy.load(crash_h)
+                seeker_policy.load(crash_s)
+                # Try to read episode counter from metadata
+                if os.path.exists(crash_meta):
+                    meta = {}
+                    for line in open(crash_meta):
+                        k, v = line.strip().split("=")
+                        meta[k] = int(v)
+                    total_episodes = meta.get("total_episodes", 0)
+                    total_steps = meta.get("total_steps", 0)
+                    start_round = total_episodes // n_envs + 1
+                    print(f"  [>>] Resumed from crash checkpoint (ep {total_episodes})")
+                    print(f"       Starting at round {start_round}")
+                else:
+                    print(f"  [>>] Resumed from crash checkpoint (no metadata)")
+                # Clean up crash files after loading
+                try:
+                    os.remove(crash_h)
+                    os.remove(crash_s)
+                    if os.path.exists(crash_meta):
+                        os.remove(crash_meta)
+                except Exception:
+                    pass
+            elif os.path.exists(best_h) and os.path.exists(best_s):
+                hider_policy.load(best_h)
+                seeker_policy.load(best_s)
+                print(f"  [>>] Resumed from best_*_policy.pt (no episode counter)")
+                print(f"       Weights + optimizer state loaded, starting round 1")
+            else:
+                print(f"  [!]  No checkpoints found in {args.resume}, starting fresh")
 
     def get_policy(agent_name):
         return hider_policy if agent_name in HIDER_NAMES else seeker_policy
@@ -262,43 +302,55 @@ def train(args):
     episode_rewards_hiders = []
     episode_rewards_seekers = []
 
-    # ── CUDA error recovery helper ──
+    # ── CUDA error handling ──
+    # Once CUDA context is corrupted, in-process recovery is impossible.
+    # Strategy: save emergency checkpoint on CPU, exit with code 42 so the
+    # wrapper script (run_training.sh) can auto-restart with --resume.
     last_checkpoint_round = 0
-    cuda_retries = 0
-    MAX_CUDA_RETRIES = 3  # give up after 3 consecutive CUDA errors
 
-    def _recover_from_cuda_error(round_at_crash):
-        """Reset CUDA state and reload weights from last checkpoint."""
-        nonlocal cuda_retries
-        cuda_retries += 1
-        if cuda_retries > MAX_CUDA_RETRIES:
-            print(f"\n[X] Too many consecutive CUDA errors ({MAX_CUDA_RETRIES}). Aborting.")
-            raise RuntimeError("CUDA recovery failed after max retries")
+    def _emergency_save_and_exit(round_at_crash, error):
+        """Save weights on CPU and exit with restart code 42."""
+        print(f"\n{'='*60}")
+        print(f"[!] CUDA error at round {round_at_crash} (ep ~{total_episodes}):")
+        print(f"    {error}")
+        print(f"{'='*60}")
 
-        print(f"\n[!]  CUDA error at round {round_at_crash}. Attempting recovery "
-              f"({cuda_retries}/{MAX_CUDA_RETRIES})...")
+        # Try to save models on CPU
+        try:
+            for name, pol in [("hider", hider_policy), ("seeker", seeker_policy)]:
+                pol.actor.cpu()
+                pol.critic.cpu()
+                ckpt = {
+                    "actor": pol.actor.state_dict(),
+                    "critic": pol.critic.state_dict(),
+                    "actor_optimizer": pol.actor_optimizer.state_dict(),
+                    "critic_optimizer": pol.critic_optimizer.state_dict(),
+                }
+                path = os.path.join(save_path, f"crash_{name}_policy.pt")
+                torch.save(ckpt, path)
+            # Also save a metadata file so resume knows where we were
+            meta_path = os.path.join(save_path, "crash_meta.txt")
+            with open(meta_path, "w") as f:
+                f.write(f"round={round_at_crash}\n")
+                f.write(f"total_episodes={total_episodes}\n")
+                f.write(f"total_steps={total_steps}\n")
+            print(f"[OK] Emergency checkpoint saved to {save_path}/crash_*_policy.pt")
+        except Exception as save_err:
+            print(f"[X]  Emergency save failed: {save_err}")
 
-        # Reset CUDA state
-        torch.cuda.empty_cache()
-        if hasattr(torch.cuda, "reset_peak_memory_stats"):
-            torch.cuda.reset_peak_memory_stats()
+        # Clean up
+        try:
+            writer.close()
+        except Exception:
+            pass
+        try:
+            vec_env.close()
+        except Exception:
+            pass
+        _allow_sleep()
 
-        # Find the latest checkpoint to reload
-        ckpt_ep = last_checkpoint_round * n_envs  # episode number of last save
-        hider_ckpt = os.path.join(save_path, f"hider_policy_ep{ckpt_ep}.pt")
-        seeker_ckpt = os.path.join(save_path, f"seeker_policy_ep{ckpt_ep}.pt")
-
-        if os.path.exists(hider_ckpt) and os.path.exists(seeker_ckpt):
-            print(f"  [>>] Reloading checkpoint from episode {ckpt_ep} ...")
-            hider_policy.load(hider_ckpt)
-            seeker_policy.load(seeker_ckpt)
-        else:
-            print(f"  [!]  No checkpoint file found -- continuing with current weights")
-
-        # Clear rollout buffers (the partially filled data is likely corrupted)
-        hider_policy.init_buffers(hider_buffer_keys)
-        seeker_policy.init_buffers(seeker_buffer_keys)
-        print(f"  [OK] Recovery complete -- resuming from round {last_checkpoint_round + 1}\n")
+        print(f"[>>] Exiting with code 42 (auto-restart).\n")
+        sys.exit(42)
 
     pbar = tqdm(range(start_round, n_rounds + 1), desc="Training", unit="round",
                 initial=start_round - 1, total=n_rounds)
@@ -406,8 +458,10 @@ def train(args):
         hider_stats = hider_policy.update()
         seeker_stats = seeker_policy.update()
 
-        # If we got here, this round succeeded — reset retry counter
-        cuda_retries = 0
+        # ── Periodic weight-NaN check (catches silent corruption early) ──
+        if hider_policy.has_nan_weights() or seeker_policy.has_nan_weights():
+            print(f"\n  [!] NaN detected in model weights at round {round_num}!")
+            _emergency_save_and_exit(round_num, ValueError("NaN in model weights"))
 
         # ── Step learning-rate schedulers ──
         hider_actor_scheduler.step()
@@ -464,12 +518,15 @@ def train(args):
                 "sps": f"{round_steps / max(round_dt, 1e-6):.0f}",
             })
 
-        # Save checkpoints
-        if round_num % args.save_interval == 0:
-            hider_policy.save(os.path.join(save_path, f"hider_policy_ep{total_episodes}.pt"))
-            seeker_policy.save(os.path.join(save_path, f"seeker_policy_ep{total_episodes}.pt"))
+        # Save checkpoints (save_interval is in EPISODES, not rounds)
+        # Check if we crossed a save_interval boundary this round
+        prev_episodes = total_episodes - n_envs  # episodes before this round
+        if (total_episodes // args.save_interval) > (prev_episodes // args.save_interval):
+            save_ep_label = (total_episodes // args.save_interval) * args.save_interval
+            hider_policy.save(os.path.join(save_path, f"hider_policy_ep{save_ep_label}.pt"))
+            seeker_policy.save(os.path.join(save_path, f"seeker_policy_ep{save_ep_label}.pt"))
             last_checkpoint_round = round_num
-            print(f"\n  [SAVE] Checkpoint saved at episode {total_episodes}")
+            print(f"\n  [SAVE] Checkpoint saved at episode {save_ep_label}")
 
         # Track best
         if avg_h > best_hider_reward:
@@ -477,19 +534,20 @@ def train(args):
             hider_policy.save(os.path.join(save_path, "best_hider_policy.pt"))
             seeker_policy.save(os.path.join(save_path, "best_seeker_policy.pt"))
 
-      except (RuntimeError, torch.cuda.CudaError) as e:
+      except (RuntimeError, ValueError, torch.cuda.CudaError) as e:
         err_msg = str(e).lower()
-        if "cuda" in err_msg or "illegal memory" in err_msg or "device-side" in err_msg:
-            _recover_from_cuda_error(round_num)
-            continue  # retry from next round
+        if ("cuda" in err_msg or "illegal memory" in err_msg
+                or "device-side" in err_msg or "nan" in err_msg
+                or "invalid values" in err_msg or "constraint" in err_msg):
+            _emergency_save_and_exit(round_num, e)
         else:
-            raise  # non-CUDA RuntimeError — reraise
+            raise  # non-recoverable error — reraise
       except Exception as e:
         # PyTorch 2.10+ raises torch.AcceleratorError instead of RuntimeError
         err_msg = str(e).lower()
-        if "cuda" in err_msg or "illegal memory" in err_msg:
-            _recover_from_cuda_error(round_num)
-            continue
+        if ("cuda" in err_msg or "illegal memory" in err_msg
+                or "nan" in err_msg or "invalid values" in err_msg):
+            _emergency_save_and_exit(round_num, e)
         else:
             raise
 

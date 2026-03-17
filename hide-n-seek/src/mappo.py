@@ -28,6 +28,50 @@ from torch.distributions import Normal
 
 
 # ──────────────────────────────────────────────────────────
+# Value Normalizer (running mean/std for returns)
+# ──────────────────────────────────────────────────────────
+
+class ValueNormalizer:
+    """
+    Running mean/std normalizer for value targets (returns).
+    This is critical for MAPPO — without it, the critic sees returns
+    with wildly different scales and can't learn effectively.
+    See: Yu et al. (2021) "The Surprising Effectiveness of PPO"
+    """
+
+    def __init__(self, clip: float = 10.0):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+        self.clip = clip
+
+    def update(self, values: np.ndarray):
+        """Update running statistics with a batch of values."""
+        batch_mean = values.mean()
+        batch_var = values.var()
+        batch_count = len(values)
+
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+        self.mean += delta * batch_count / total_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta ** 2 * self.count * batch_count / total_count
+        self.var = m2 / total_count
+        self.count = total_count
+
+    def normalize(self, values: np.ndarray) -> np.ndarray:
+        """Normalize values to zero mean, unit variance."""
+        std = np.sqrt(self.var + 1e-8)
+        return np.clip((values - self.mean) / std, -self.clip, self.clip)
+
+    def denormalize(self, values: np.ndarray) -> np.ndarray:
+        """Convert normalized values back to original scale."""
+        std = np.sqrt(self.var + 1e-8)
+        return values * std + self.mean
+
+
+# ──────────────────────────────────────────────────────────
 # Observation layout constants  (must stay in sync with env.py)
 # ──────────────────────────────────────────────────────────
 
@@ -186,7 +230,7 @@ class EntityActorNetwork(nn.Module):
         )
 
         self.mean_head = nn.Linear(embed_dim, act_dim)
-        self.log_std = nn.Parameter(torch.zeros(act_dim))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -0.5))  # σ ≈ 0.6
 
         # Init
         self.apply(lambda m: _init_weights(m, gain=np.sqrt(2)))
@@ -266,6 +310,7 @@ class EntityActorNetwork(nn.Module):
         other_entities = x[:, 1:, :]                             # (B, 10, D)
         other_mask = entity_mask[:, 1:].unsqueeze(-1).float()    # (B, 10, 1)
         pooled = (other_entities * other_mask).sum(dim=1) / (other_mask.sum(dim=1).clamp(min=1))
+        pooled = torch.nan_to_num(pooled, nan=0.0)  # safety after division
         # (B, D)
 
         # Self embedding from attention output
@@ -279,7 +324,13 @@ class EntityActorNetwork(nn.Module):
         features = self.final_mlp(combined)
 
         mean = self.mean_head(features)
-        std = self.log_std.exp().expand_as(mean)
+
+        # ── NaN safety: clamp mean and detect corrupt forward pass ──
+        if torch.isnan(mean).any() or torch.isinf(mean).any():
+            mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
+        mean = torch.clamp(mean, -5.0, 5.0)
+
+        std = self.log_std.exp().clamp(min=0.1, max=1.0).expand_as(mean)
         return Normal(mean, std)
 
     def get_action(self, obs: torch.Tensor, deterministic: bool = False):
@@ -289,13 +340,18 @@ class EntityActorNetwork(nn.Module):
         else:
             action = dist.rsample()
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
+        # Safety clamp
         action = torch.clamp(action, -1.0, 1.0)
+        log_prob = torch.nan_to_num(log_prob, nan=0.0, posinf=0.0, neginf=-20.0)
         return action, log_prob
 
     def evaluate(self, obs: torch.Tensor, action: torch.Tensor):
         dist = self.forward(obs)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         entropy = dist.entropy().sum(-1, keepdim=True)
+        # Safety: NaN in log_prob/entropy can poison the loss
+        log_prob = torch.nan_to_num(log_prob, nan=0.0, posinf=0.0, neginf=-20.0)
+        entropy = torch.nan_to_num(entropy, nan=0.0, posinf=0.0, neginf=0.0)
         return log_prob, entropy
 
 
@@ -467,6 +523,9 @@ class TeamPolicy:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr_actor, eps=1e-5)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic, eps=1e-5)
 
+        # Value normalizer — critical for stable critic training
+        self.value_normalizer = ValueNormalizer()
+
         # Per-agent rollout buffers (keys can be strings or tuples)
         self.buffers: dict = {}
 
@@ -507,6 +566,12 @@ class TeamPolicy:
         obs_t = torch.FloatTensor(obs_batch).to(self.device)
         state_t = torch.FloatTensor(state_batch).to(self.device)
 
+        # ── Sanitise inputs: NaN/Inf from env should not enter the network ──
+        obs_t = torch.nan_to_num(obs_t, nan=0.0, posinf=10.0, neginf=-10.0)
+        obs_t = torch.clamp(obs_t, -10.0, 10.0)
+        state_t = torch.nan_to_num(state_t, nan=0.0, posinf=10.0, neginf=-10.0)
+        state_t = torch.clamp(state_t, -10.0, 10.0)
+
         with torch.no_grad():
             actions, log_probs = self.actor.get_action(obs_t, deterministic=deterministic)
             values = self.critic(state_t)
@@ -543,7 +608,14 @@ class TeamPolicy:
         if not all_advantages:
             return {}
 
-        # Normalise advantages globally
+        # Update value normalizer with raw returns, then normalize
+        all_ret_cat = np.concatenate(all_returns)
+        self.value_normalizer.update(all_ret_cat)
+        all_returns_norm = []
+        for ret in all_returns:
+            all_returns_norm.append(self.value_normalizer.normalize(ret))
+
+        # Normalise advantages
         all_adv = np.concatenate(all_advantages)
         adv_mean, adv_std = all_adv.mean(), all_adv.std() + 1e-8
 
@@ -555,18 +627,18 @@ class TeamPolicy:
 
         for epoch in range(self.ppo_epochs):
             # Iterate over each agent's buffer
-            adv_offset = 0
-            ret_offset = 0
-            for name, buf in self.buffers.items():
+            buf_keys = list(self.buffers.keys())
+            for buf_idx, (name, buf) in enumerate(self.buffers.items()):
                 if len(buf) == 0:
                     continue
                 n = len(buf)
-                advantages = all_advantages[list(self.buffers.keys()).index(name)]
-                returns = all_returns[list(self.buffers.keys()).index(name)]
+                idx_in_list = buf_keys.index(name)
+                advantages = all_advantages[idx_in_list]
+                returns_norm = all_returns_norm[idx_in_list]
                 norm_advantages = (advantages - adv_mean) / adv_std
 
                 for (b_obs, b_state, b_act, b_old_lp, b_adv, b_ret) in buf.get_batches(
-                    norm_advantages, returns, self.mini_batch_size
+                    norm_advantages, returns_norm, self.mini_batch_size
                 ):
                     b_obs = b_obs.to(self.device)
                     b_state = b_state.to(self.device)
@@ -575,9 +647,19 @@ class TeamPolicy:
                     b_adv = b_adv.unsqueeze(-1).to(self.device)
                     b_ret = b_ret.unsqueeze(-1).to(self.device)
 
+                    # ── Sanitise training batch inputs ──
+                    b_obs = torch.nan_to_num(b_obs, nan=0.0, posinf=10.0, neginf=-10.0)
+                    b_state = torch.nan_to_num(b_state, nan=0.0, posinf=10.0, neginf=-10.0)
+                    b_act = torch.nan_to_num(b_act, nan=0.0, posinf=1.0, neginf=-1.0)
+                    b_old_lp = torch.nan_to_num(b_old_lp, nan=0.0, posinf=0.0, neginf=-20.0)
+                    b_adv = torch.nan_to_num(b_adv, nan=0.0, posinf=10.0, neginf=-10.0)
+                    b_ret = torch.nan_to_num(b_ret, nan=0.0, posinf=10.0, neginf=-10.0)
+
                     # Actor loss
                     new_log_prob, entropy = self.actor.evaluate(b_obs, b_act)
                     ratio = (new_log_prob - b_old_lp.unsqueeze(-1)).exp()
+                    # Clamp ratio to prevent explosion from stale log_probs
+                    ratio = torch.clamp(ratio, 0.0, 10.0)
                     surr1 = ratio * b_adv
                     surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * b_adv
                     policy_loss = -torch.min(surr1, surr2).mean()
@@ -589,10 +671,33 @@ class TeamPolicy:
                     # Total loss
                     loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
 
+                    # ── Skip update if loss is NaN ──
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        self.actor_optimizer.zero_grad()
+                        self.critic_optimizer.zero_grad()
+                        continue
+
                     # Update actor
                     self.actor_optimizer.zero_grad()
                     self.critic_optimizer.zero_grad()
                     loss.backward()
+
+                    # ── Check for NaN gradients and skip if found ──
+                    has_nan_grad = False
+                    for p in self.actor.parameters():
+                        if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                            has_nan_grad = True
+                            break
+                    if not has_nan_grad:
+                        for p in self.critic.parameters():
+                            if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                                has_nan_grad = True
+                                break
+                    if has_nan_grad:
+                        self.actor_optimizer.zero_grad()
+                        self.critic_optimizer.zero_grad()
+                        continue
+
                     nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.actor_optimizer.step()
@@ -630,3 +735,13 @@ class TeamPolicy:
         self.critic.load_state_dict(checkpoint["critic"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+
+    def has_nan_weights(self) -> bool:
+        """Check if any model weights or biases contain NaN/Inf."""
+        for name, p in self.actor.named_parameters():
+            if torch.isnan(p).any() or torch.isinf(p).any():
+                return True
+        for name, p in self.critic.named_parameters():
+            if torch.isnan(p).any() or torch.isinf(p).any():
+                return True
+        return False
