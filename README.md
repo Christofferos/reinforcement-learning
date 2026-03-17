@@ -7,9 +7,10 @@
 </table>
 
 Here are some of the projects I have done. Have a look:
-1. https://www.youtube.com/shorts/LoGcZkZzLSA
-2. https://www.youtube.com/watch?v=_F91ktb_wxU
-3. https://www.youtube.com/watch?v=CYF2pNHuyC8
+1. https://www.youtube.com/watch?v=_F91ktb_wxU
+2. https://www.youtube.com/watch?v=CYF2pNHuyC8
+3. https://www.youtube.com/shorts/LoGcZkZzLSA
+
 
 
 # Reinforcement Learning 🗺️
