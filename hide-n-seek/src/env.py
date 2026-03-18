@@ -83,11 +83,12 @@ _PREP_RGBA = np.array([0.45, 0.45, 0.50, 0.6], dtype=np.float32)
 # These are strong enough to guide early learning but the base ±1 game
 # reward (× 144 play-phase steps) still dominates once strategies emerge.
 
-# -- Prep phase (hiders only) --
-SHAPE_PREP_MOVEMENT    = 0.005   # hider bonus per unit speed during prep
-SHAPE_GRAB_AND_MOVE    = 0.01    # bonus per step for grabbing + moving an object
-SHAPE_HIDER_NEAR_COVER = 0.02    # hider bonus during prep if lidar sees wall nearby
-SHAPE_PREP_NEAR_OBJECT = 0.01    # hider bonus during prep if within 2m of a box/ramp
+# -- Prep phase (hiders only) -- DOUBLED for single-machine training
+SHAPE_PREP_MOVEMENT    = 0.01    # hider bonus per unit speed during prep  (was 0.005)
+SHAPE_GRAB_AND_MOVE    = 0.02    # bonus per step for grabbing + moving an object (was 0.01)
+SHAPE_HIDER_NEAR_COVER = 0.04    # hider bonus during prep if lidar sees wall nearby (was 0.02)
+SHAPE_PREP_NEAR_OBJECT = 0.02    # hider bonus during prep if within 2m of a box/ramp (was 0.01)
+SHAPE_BOX_TOWARD_WALL  = 0.03    # NEW: hider bonus for pushing a grabbed box closer to a wall
 
 # -- Play phase --
 SHAPE_HIDER_DIST_FROM_SEEKER = 0.05   # hider bonus: normalized dist to nearest seeker
@@ -103,12 +104,13 @@ _COVERAGE_CELL_SIZE          = 2.0    # metres per grid cell (12m arena → 6×6
 _ARENA_HALF                  = 6.0    # half-width of arena (for cell index clamping)
 
 # -- Blending --
-SHAPE_INDIVIDUAL_BLEND = 0.25   # fraction of per-agent reward blended into team reward
+SHAPE_INDIVIDUAL_BLEND = 0.4    # fraction of per-agent reward blended in (was 0.25)
 
 _COVER_LIDAR_THRESHOLD = 2.0 / 18.0  # 2.0m / lidar_max_dist (normalised)
 _GRAB_MOVE_VEL_THRESH  = 0.05  # min object velocity (m/step) to count as "moving"
 _NEAR_OBJECT_DIST      = 2.0   # metres — prep "near object" threshold
 _ARENA_DIAGONAL        = 17.0  # 12m × 12m arena diagonal for normalization
+_BOX_WALL_DIST_THRESH  = 3.0   # metres — box-toward-wall bonus if box is within this of a wall
 
 
 # ──────────────────────────────────────────────────────────
@@ -273,18 +275,32 @@ class HideAndSeekEnv(gym.Env):
         movement_scale: float = 1.0,
         render_mode: str | None = None,
         procedural: bool = True,
+        # Curriculum parameters (passed through to worldgen)
+        allowed_layouts: list[str] | None = None,
+        n_boxes_range: tuple[int, int] | None = None,
+        n_ramps_range: tuple[int, int] | None = None,
     ):
         super().__init__()
 
         # ── Procedural mode flag ──
         self.procedural = procedural
 
+        # ── Curriculum generation parameters ──
+        self._allowed_layouts = allowed_layouts
+        self._n_boxes_range = n_boxes_range
+        self._n_ramps_range = n_ramps_range
+
         # ── MuJoCo model ──
         # In procedural mode we generate a fresh XML on every reset.
         # The first model is built now so that spaces/dimensions are available.
         if self.procedural:
             self._worldgen_rng = np.random.default_rng()
-            xml, self._last_meta = generate_arena(self._worldgen_rng)
+            xml, self._last_meta = generate_arena(
+                self._worldgen_rng,
+                allowed_layouts=self._allowed_layouts,
+                n_boxes_range=self._n_boxes_range,
+                n_ramps_range=self._n_ramps_range,
+            )
             self.model = mujoco.MjModel.from_xml_string(xml)
             self._cur_n_boxes = self._last_meta["n_boxes"]
             self._cur_n_ramps = self._last_meta["n_ramps"]
@@ -709,6 +725,25 @@ class HideAndSeekEnv(gym.Env):
                 if near_obj:
                     rewards[name] += SHAPE_PREP_NEAR_OBJECT
 
+            # SHAPING 5 (NEW): Box-toward-wall bonus during prep
+            # Reward hiders for pushing grabbed boxes closer to arena walls,
+            # which directly seeds barricade-building behaviour.
+            for hi in range(N_HIDERS):
+                agent_idx_h = hi  # hider indices are 0..N_HIDERS-1
+                for bi in range(self._cur_n_boxes):
+                    if self.box_grabbed_by[bi] == agent_idx_h and box_moved[bi] > _GRAB_MOVE_VEL_THRESH:
+                        bx, by = cur_box_pos[bi]
+                        prev_bx, prev_by = self._prev_box_pos[bi]
+                        # Distance to nearest arena wall (outer wall at ±ARENA_HALF)
+                        cur_wall_dist = min(abs(bx - _ARENA_HALF), abs(bx + _ARENA_HALF),
+                                            abs(by - _ARENA_HALF), abs(by + _ARENA_HALF))
+                        prev_wall_dist = min(abs(prev_bx - _ARENA_HALF), abs(prev_bx + _ARENA_HALF),
+                                             abs(prev_by - _ARENA_HALF), abs(prev_by + _ARENA_HALF))
+                        # Bonus if box moved closer to any wall
+                        approach = prev_wall_dist - cur_wall_dist
+                        if approach > 0 and cur_wall_dist < _BOX_WALL_DIST_THRESH:
+                            rewards[HIDER_NAMES[hi]] += SHAPE_BOX_TOWARD_WALL * approach
+
         # ══════════════════════════════════════════
         # SHAPING 2: Grab + move objects (both teams, both phases)
         # ══════════════════════════════════════════
@@ -1007,11 +1042,14 @@ class HideAndSeekEnv(gym.Env):
         rng = self.np_random
 
         if self.procedural:
-            # ── Generate a fresh arena layout ──
+            # ── Generate a fresh arena layout (curriculum-aware) ──
             xml, meta = generate_arena(
                 self._worldgen_rng,
                 n_hiders=N_HIDERS,
                 n_seekers=N_SEEKERS,
+                allowed_layouts=self._allowed_layouts,
+                n_boxes_range=self._n_boxes_range,
+                n_ramps_range=self._n_ramps_range,
             )
             self._last_meta = meta
             self._cur_n_boxes = meta["n_boxes"]

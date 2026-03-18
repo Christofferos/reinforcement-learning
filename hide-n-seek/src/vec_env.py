@@ -33,6 +33,10 @@ class SyncVectorMultiAgentEnv:
         reward_type: str = "joint_zero_sum",
         render_mode: str | None = None,
         procedural: bool = True,
+        # Curriculum parameters (passed through to HideAndSeekEnv → worldgen)
+        allowed_layouts: list[str] | None = None,
+        n_boxes_range: tuple[int, int] | None = None,
+        n_ramps_range: tuple[int, int] | None = None,
     ):
         self.n_envs = n_envs
         self.envs = [
@@ -43,6 +47,9 @@ class SyncVectorMultiAgentEnv:
                 # Only render the first env (if requested)
                 render_mode=render_mode if i == 0 else None,
                 procedural=procedural,
+                allowed_layouts=allowed_layouts,
+                n_boxes_range=n_boxes_range,
+                n_ramps_range=n_ramps_range,
             )
             for i in range(n_envs)
         ]

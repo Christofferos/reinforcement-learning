@@ -60,14 +60,21 @@ from tqdm import tqdm
 from env import HIDER_NAMES, SEEKER_NAMES, AGENT_NAMES
 from vec_env import SyncVectorMultiAgentEnv
 from mappo import TeamPolicy
-from config import ENV_CONFIG, MAPPO_CONFIG
+from config import ENV_CONFIG, MAPPO_CONFIG, CURRICULUM_PHASES
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Hide & Seek with MAPPO")
 
+    # Curriculum
+    parser.add_argument("--curriculum_phase", type=int, default=None,
+                        choices=[1, 2, 3],
+                        help="Curriculum phase (1=simple, 2=complex, 3=full). "
+                             "Overrides horizon, n_episodes, hidden_dim, entropy schedule.")
+
     # Environment
-    parser.add_argument("--horizon", type=int, default=ENV_CONFIG["horizon"])
+    parser.add_argument("--horizon", type=int, default=None,
+                        help=f"Episode horizon (default: {ENV_CONFIG['horizon']}, overridden by curriculum)")
     parser.add_argument("--prep_fraction", type=float, default=ENV_CONFIG["prep_fraction"])
     parser.add_argument("--reward_type", type=str, default=ENV_CONFIG["reward_type"],
                         choices=["joint_zero_sum", "joint_mean", "selfish"])
@@ -75,16 +82,19 @@ def parse_args():
                         help="Number of parallel environments")
 
     # Training
-    parser.add_argument("--n_episodes", type=int, default=20_000,
-                        help="Total episodes across all envs (rounded to multiples of n_envs)")
+    parser.add_argument("--n_episodes", type=int, default=None,
+                        help="Total episodes across all envs (default: 20000, overridden by curriculum)")
     parser.add_argument("--ppo_epochs", type=int, default=MAPPO_CONFIG["ppo_epochs"])
     parser.add_argument("--lr_actor", type=float, default=MAPPO_CONFIG["lr_actor"])
     parser.add_argument("--lr_critic", type=float, default=MAPPO_CONFIG["lr_critic"])
-    parser.add_argument("--hidden_dim", type=int, default=MAPPO_CONFIG["hidden_dim"])
+    parser.add_argument("--hidden_dim", type=int, default=None,
+                        help=f"Critic hidden dim (default: {MAPPO_CONFIG['hidden_dim']}, overridden by curriculum)")
     parser.add_argument("--gamma", type=float, default=MAPPO_CONFIG["gamma"])
     parser.add_argument("--clip_epsilon", type=float, default=MAPPO_CONFIG["clip_epsilon"])
-    parser.add_argument("--entropy_coef", type=float, default=MAPPO_CONFIG["entropy_coef"])
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--entropy_coef", type=float, default=None,
+                        help=f"Entropy coefficient (default: {MAPPO_CONFIG['entropy_coef']}, overridden by curriculum)")
+    _default_device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default=_default_device)
 
     # Logging
     parser.add_argument("--log_interval", type=int, default=MAPPO_CONFIG["log_interval"],
@@ -129,6 +139,43 @@ def train(args):
 
     writer = SummaryWriter(log_path)
 
+    # ── Apply curriculum phase overrides ──
+    cur_phase = None
+    allowed_layouts = None
+    n_boxes_range = None
+    n_ramps_range = None
+    entropy_start = MAPPO_CONFIG["entropy_coef"]
+    entropy_end = MAPPO_CONFIG.get("entropy_coef_end", 0.005)
+
+    if args.curriculum_phase is not None:
+        cur_phase = CURRICULUM_PHASES[args.curriculum_phase]
+        print(f"\n  [CURRICULUM] Phase {args.curriculum_phase}: {cur_phase['description']}")
+        # Override env params from curriculum if not explicitly set on CLI
+        if args.horizon is None:
+            args.horizon = cur_phase["horizon"]
+        if args.n_episodes is None:
+            args.n_episodes = cur_phase["suggested_episodes"]
+        if args.hidden_dim is None:
+            args.hidden_dim = cur_phase["hidden_dim"]
+        if args.entropy_coef is None:
+            entropy_start = cur_phase["entropy_coef_start"]
+            entropy_end = cur_phase["entropy_coef_end"]
+        else:
+            entropy_start = args.entropy_coef
+        allowed_layouts = cur_phase["allowed_layouts"]
+        n_boxes_range = cur_phase["n_boxes_range"]
+        n_ramps_range = cur_phase["n_ramps_range"]
+    else:
+        # Defaults when no curriculum phase specified
+        if args.horizon is None:
+            args.horizon = ENV_CONFIG["horizon"]
+        if args.n_episodes is None:
+            args.n_episodes = 20_000
+        if args.hidden_dim is None:
+            args.hidden_dim = MAPPO_CONFIG["hidden_dim"]
+        if args.entropy_coef is not None:
+            entropy_start = args.entropy_coef
+
     n_envs = args.n_envs
     vec_env = SyncVectorMultiAgentEnv(
         n_envs=n_envs,
@@ -137,6 +184,9 @@ def train(args):
         reward_type=args.reward_type,
         render_mode="human" if args.render else None,
         procedural=not args.no_procedural,
+        allowed_layouts=allowed_layouts,
+        n_boxes_range=n_boxes_range,
+        n_ramps_range=n_ramps_range,
     )
 
     # Get dimensions from a test reset
@@ -152,6 +202,8 @@ def train(args):
     print(f"{'='*60}")
     print(f"Hide & Seek — MAPPO Training (Vectorized)")
     print(f"{'='*60}")
+    if cur_phase:
+        print(f"  Curriculum:       Phase {args.curriculum_phase} \u2014 {cur_phase['description']}")
     print(f"  Obs dim:          {obs_dim}")
     print(f"  Action dim:       {act_dim}")
     print(f"  Global state dim: {global_state_dim}")
@@ -164,14 +216,24 @@ def train(args):
     print(f"  Rollout rounds:   {n_rounds}")
     print(f"  Total episodes:   ~{total_episodes_planned}")
     print(f"  Steps/round:      {args.horizon} x {n_envs} = {args.horizon * n_envs}")
+    print(f"  Entropy:          {entropy_start:.4f} \u2192 {entropy_end:.4f} (linear decay)")
+    print(f"  LR end factor:    {MAPPO_CONFIG.get('lr_end_factor', 0.1)}")
     print(f"{'='*60}\n")
 
     # ── Build policy config ──
+    # Use curriculum-appropriate network sizes
+    attn_embed = (cur_phase["attn_embed_dim"] if cur_phase
+                  else MAPPO_CONFIG.get("attn_embed_dim", 128))
+    attn_heads = (cur_phase["attn_n_heads"] if cur_phase
+                  else MAPPO_CONFIG.get("attn_n_heads", 4))
+    attn_layers = (cur_phase["attn_n_layers"] if cur_phase
+                   else MAPPO_CONFIG.get("attn_n_layers", 2))
+
     policy_config = {
         "gamma": args.gamma,
         "gae_lambda": MAPPO_CONFIG["gae_lambda"],
         "clip_epsilon": args.clip_epsilon,
-        "entropy_coef": args.entropy_coef,
+        "entropy_coef": entropy_start,
         "value_coef": MAPPO_CONFIG["value_coef"],
         "max_grad_norm": MAPPO_CONFIG["max_grad_norm"],
         "ppo_epochs": args.ppo_epochs,
@@ -181,10 +243,12 @@ def train(args):
         "use_feature_norm": MAPPO_CONFIG["use_feature_norm"],
         "lr_actor": args.lr_actor,
         "lr_critic": args.lr_critic,
-        # Entity-attention actor config
-        "attn_embed_dim": MAPPO_CONFIG.get("attn_embed_dim", 128),
-        "attn_n_heads": MAPPO_CONFIG.get("attn_n_heads", 4),
-        "attn_n_layers": MAPPO_CONFIG.get("attn_n_layers", 2),
+        # Entity-attention actor config (curriculum-aware sizes)
+        "attn_embed_dim": attn_embed,
+        "attn_n_heads": attn_heads,
+        "attn_n_layers": attn_layers,
+        # Value normalizer warmup
+        "value_norm_warmup_rounds": MAPPO_CONFIG.get("value_norm_warmup_rounds", 50),
     }
 
     # ── One shared policy per team ──
@@ -218,15 +282,24 @@ def train(args):
         if hider_ckpts and seeker_ckpts:
             latest_hider = hider_ckpts[-1]
             latest_seeker = seeker_ckpts[-1]
-            hider_policy.load(latest_hider)
-            seeker_policy.load(latest_seeker)
-            # Parse episode number from filename
-            ep_num = int(os.path.basename(latest_hider).split("_ep")[1].split(".pt")[0])
-            start_round = ep_num // n_envs + 1
-            total_episodes = ep_num
-            total_steps = ep_num * args.horizon
-            print(f"  [>>] Resumed from {latest_hider}")
-            print(f"       Starting at round {start_round}, episode {total_episodes}")
+            try:
+                hider_policy.load(latest_hider)
+                seeker_policy.load(latest_seeker)
+                # Parse episode number from filename
+                ep_num = int(os.path.basename(latest_hider).split("_ep")[1].split(".pt")[0])
+                start_round = ep_num // n_envs + 1
+                total_episodes = ep_num
+                total_steps = ep_num * args.horizon
+                print(f"  [>>] Resumed from {latest_hider}")
+                print(f"       Starting at round {start_round}, episode {total_episodes}")
+            except RuntimeError as e:
+                if "size mismatch" in str(e) or "Missing key" in str(e) or "Unexpected key" in str(e):
+                    print(f"  [!]  Architecture changed (curriculum phase transition).")
+                    print(f"       Cannot load weights — starting with fresh network.")
+                    print(f"       (This is expected when moving between curriculum phases")
+                    print(f"        with different network sizes.)")
+                else:
+                    raise
         else:
             # Try crash checkpoint first (most recent state before CUDA death)
             crash_h = os.path.join(args.resume, "crash_hider_policy.pt")
@@ -236,34 +309,40 @@ def train(args):
             best_s = os.path.join(args.resume, "best_seeker_policy.pt")
 
             if os.path.exists(crash_h) and os.path.exists(crash_s):
-                hider_policy.load(crash_h)
-                seeker_policy.load(crash_s)
-                # Try to read episode counter from metadata
-                if os.path.exists(crash_meta):
-                    meta = {}
-                    for line in open(crash_meta):
-                        k, v = line.strip().split("=")
-                        meta[k] = int(v)
-                    total_episodes = meta.get("total_episodes", 0)
-                    total_steps = meta.get("total_steps", 0)
-                    start_round = total_episodes // n_envs + 1
-                    print(f"  [>>] Resumed from crash checkpoint (ep {total_episodes})")
-                    print(f"       Starting at round {start_round}")
-                else:
-                    print(f"  [>>] Resumed from crash checkpoint (no metadata)")
-                # Clean up crash files after loading
                 try:
-                    os.remove(crash_h)
-                    os.remove(crash_s)
+                    hider_policy.load(crash_h)
+                    seeker_policy.load(crash_s)
+                    # Try to read episode counter from metadata
                     if os.path.exists(crash_meta):
-                        os.remove(crash_meta)
-                except Exception:
-                    pass
+                        meta = {}
+                        for line in open(crash_meta):
+                            k, v = line.strip().split("=")
+                            meta[k] = int(v)
+                        total_episodes = meta.get("total_episodes", 0)
+                        total_steps = meta.get("total_steps", 0)
+                        start_round = total_episodes // n_envs + 1
+                        print(f"  [>>] Resumed from crash checkpoint (ep {total_episodes})")
+                        print(f"       Starting at round {start_round}")
+                    else:
+                        print(f"  [>>] Resumed from crash checkpoint (no metadata)")
+                    # Clean up crash files after loading
+                    try:
+                        os.remove(crash_h)
+                        os.remove(crash_s)
+                        if os.path.exists(crash_meta):
+                            os.remove(crash_meta)
+                    except Exception:
+                        pass
+                except RuntimeError:
+                    print(f"  [!]  Architecture mismatch — starting fresh")
             elif os.path.exists(best_h) and os.path.exists(best_s):
-                hider_policy.load(best_h)
-                seeker_policy.load(best_s)
-                print(f"  [>>] Resumed from best_*_policy.pt (no episode counter)")
-                print(f"       Weights + optimizer state loaded, starting round 1")
+                try:
+                    hider_policy.load(best_h)
+                    seeker_policy.load(best_s)
+                    print(f"  [>>] Resumed from best_*_policy.pt (no episode counter)")
+                    print(f"       Weights + optimizer state loaded, starting round 1")
+                except RuntimeError:
+                    print(f"  [!]  Architecture mismatch — starting fresh")
             else:
                 print(f"  [!]  No checkpoints found in {args.resume}, starting fresh")
 
@@ -273,18 +352,19 @@ def train(args):
     def buf_key(env_idx, agent_name):
         return (env_idx, agent_name)
 
-    # ── Learning-rate schedulers (linear annealing to 0) ──
+    # \u2500\u2500 Learning-rate schedulers (linear annealing to 10% \u2014 NOT zero) \u2500\u2500
+    lr_end_factor = MAPPO_CONFIG.get("lr_end_factor", 0.1)
     hider_actor_scheduler = torch.optim.lr_scheduler.LinearLR(
-        hider_policy.actor_optimizer, start_factor=1.0, end_factor=0.0,
+        hider_policy.actor_optimizer, start_factor=1.0, end_factor=lr_end_factor,
         total_iters=n_rounds)
     hider_critic_scheduler = torch.optim.lr_scheduler.LinearLR(
-        hider_policy.critic_optimizer, start_factor=1.0, end_factor=0.0,
+        hider_policy.critic_optimizer, start_factor=1.0, end_factor=lr_end_factor,
         total_iters=n_rounds)
     seeker_actor_scheduler = torch.optim.lr_scheduler.LinearLR(
-        seeker_policy.actor_optimizer, start_factor=1.0, end_factor=0.0,
+        seeker_policy.actor_optimizer, start_factor=1.0, end_factor=lr_end_factor,
         total_iters=n_rounds)
     seeker_critic_scheduler = torch.optim.lr_scheduler.LinearLR(
-        seeker_policy.critic_optimizer, start_factor=1.0, end_factor=0.0,
+        seeker_policy.critic_optimizer, start_factor=1.0, end_factor=lr_end_factor,
         total_iters=n_rounds)
 
     # If resuming, fast-forward schedulers to the correct LR
@@ -469,6 +549,13 @@ def train(args):
         seeker_actor_scheduler.step()
         seeker_critic_scheduler.step()
 
+        # ── Entropy coefficient linear decay ──
+        progress = (round_num - start_round) / max(n_rounds - start_round, 1)
+        current_entropy = entropy_start + (entropy_end - entropy_start) * progress
+        current_entropy = max(current_entropy, entropy_end)
+        hider_policy.entropy_coef = current_entropy
+        seeker_policy.entropy_coef = current_entropy
+
         # ── Logging (average across N envs) ──
         round_hider_rews = []
         round_seeker_rews = []
@@ -493,6 +580,7 @@ def train(args):
         writer.add_scalar("episode/total_episodes", total_episodes, round_num)
         writer.add_scalar("episode/total_steps", total_steps, round_num)
         writer.add_scalar("lr/actor", hider_actor_scheduler.get_last_lr()[0], round_num)
+        writer.add_scalar("lr/entropy_coef", current_entropy, round_num)
         writer.add_scalar("perf/round_time_s", round_dt, round_num)
         writer.add_scalar("perf/steps_per_sec", round_steps / max(round_dt, 1e-6), round_num)
 

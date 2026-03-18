@@ -379,65 +379,77 @@ def _ramp_xml(idx: int, x: float, y: float, yaw: float = 0.0,
 _WALL_GAP = 1.2
 
 
-def _gen_layout(rng: Generator) -> dict:
+def _gen_layout(rng: Generator,
+                allowed_layouts: list[str] | None = None) -> dict:
     """
     Generate a random room layout.
 
     Layout families:
-      A) divider  — one vertical wall splitting the arena, optional stub walls
+      A) divider  — one horizontal wall splitting the arena, optional vertical stub walls
       B) cross    — vertical + horizontal wall that do NOT touch each other
       C) L_shape  — two walls forming an L, but with a guaranteed gap at the corner
-      D) open     — no interior walls (pure chase, extra objects compensate)
+      D) rooms    — two perpendicular walls creating 3-4 enclosed areas
 
     IMPORTANT: interior walls never meet each other.  Every wall either
     - ends at an outer arena edge, OR
     - stops short of the other wall by at least _WALL_GAP metres.
     This guarantees agents always have a path around every wall.
+
+    Args:
+        allowed_layouts: subset of layout types to sample from (curriculum control).
+                         If None, all types are equally likely.
     """
-    layout_type = rng.choice(["divider", "cross", "L_shape", "rooms"],
-                             p=[0.25, 0.25, 0.25, 0.25])
+    all_types = ["divider", "cross", "L_shape", "rooms"]
+    if allowed_layouts is not None:
+        choices = [t for t in all_types if t in allowed_layouts]
+        if not choices:
+            choices = all_types  # fallback
+    else:
+        choices = all_types
+    layout_type = rng.choice(choices)
 
     walls = []  # list of (orientation, pos, start, end, [door_positions], door_width)
     A = ARENA_HALF  # 6.0
 
     if layout_type == "divider":
-        # ── Vertical wall from south edge to north edge ──
-        vx = float(rng.uniform(-1.0, 3.0))
+        # ── Horizontal wall from west edge to east edge ──
+        hy = float(rng.uniform(-1.5, 1.5))
         n_doors = int(rng.integers(1, 3))  # 1-2 doors
         door_width = float(rng.uniform(1.0, 2.0))
-        door_ys = rng.uniform(-A + 1.5, A - 1.5, size=n_doors).tolist()
-        walls.append(("v", vx, -A, A, door_ys, door_width))
+        door_xs = rng.uniform(-A + 1.5, A - 1.5, size=n_doors).tolist()
+        walls.append(("h", hy, -A, A, door_xs, door_width))
 
-        # Optional horizontal STUB in lower-left quadrant.
-        # Runs from west arena edge but STOPS SHORT of the vertical wall.
+        # Optional vertical STUB on the left side.
+        # Runs from south arena edge but STOPS SHORT of the horizontal wall.
         if rng.random() < 0.6:
-            hy = float(rng.uniform(-A + 1.5, -0.5))
-            stub_end = vx - _WALL_GAP      # guaranteed gap before vertical wall
+            vx = float(rng.uniform(-A + 1.5, -0.5))
+            stub_end = hy - _WALL_GAP      # guaranteed gap before horizontal wall
             if stub_end > -A + 2.0:         # only if stub is long enough to matter
                 n_d = int(rng.integers(1, 2))
                 dw = float(rng.uniform(1.0, 1.8))
                 door_lo = -A + 1.0
                 door_hi = max(door_lo + 0.1, stub_end - 0.5)
-                dxs = rng.uniform(door_lo, door_hi, size=n_d).tolist()
-                walls.append(("h", hy, -A, stub_end, dxs, dw))
+                dys = rng.uniform(door_lo, door_hi, size=n_d).tolist()
+                walls.append(("v", vx, -A, stub_end, dys, dw))
 
-        # Optional horizontal STUB in upper-right quadrant.
-        # Runs from vertical wall + gap to east arena edge.
+        # Optional vertical STUB on the right side, above the horizontal wall.
+        # Runs from horizontal wall + gap to north arena edge.
         if rng.random() < 0.5:
-            hy2 = float(rng.uniform(0.5, A - 1.5))
-            stub_start = vx + _WALL_GAP    # guaranteed gap after vertical wall
+            vx2 = float(rng.uniform(0.5, A - 1.5))
+            stub_start = hy + _WALL_GAP    # guaranteed gap after horizontal wall
             if stub_start < A - 2.0:
                 n_d2 = int(rng.integers(1, 2))
                 dw2 = float(rng.uniform(1.0, 1.8))
                 door_lo2 = stub_start + 0.5
                 door_hi2 = max(door_lo2 + 0.1, A - 1.0)
-                dxs2 = rng.uniform(door_lo2, door_hi2, size=n_d2).tolist()
-                walls.append(("h", hy2, stub_start, A, dxs2, dw2))
+                dys2 = rng.uniform(door_lo2, door_hi2, size=n_d2).tolist()
+                walls.append(("v", vx2, stub_start, A, dys2, dw2))
 
-        hider_zones = [(vx + 1.0, A - 0.5, -A + 0.5, -0.5),
-                        (-A + 0.5, vx - 0.5, -A + 0.5, -1.0)]
-        seeker_zones = [(-A + 0.5, vx - 0.5, 0.5, A - 0.5),
-                        (vx + 1.0, A - 0.5, 1.0, A - 0.5)]
+        # Hiders spawn below the wall, seekers above
+        hider_zones = [(-A + 0.5, A - 0.5, -A + 0.5, hy - 1.0),
+                        (-A + 0.5, -0.5, -A + 0.5, hy - 0.5)]
+        seeker_zones = [(-A + 0.5, A - 0.5, hy + 1.0, A - 0.5),
+                        (0.5, A - 0.5, hy + 0.5, A - 0.5)]
 
     elif layout_type == "cross":
         # ── Two walls that NEVER touch ──
@@ -596,16 +608,22 @@ def generate_arena(
     n_seekers: int = 2,
     n_boxes: int | None = None,
     n_ramps: int | None = None,
+    n_boxes_range: tuple[int, int] | None = None,
+    n_ramps_range: tuple[int, int] | None = None,
+    allowed_layouts: list[str] | None = None,
 ) -> tuple[str, dict]:
     """
     Generate a complete MuJoCo XML string for a randomised Hide & Seek arena.
 
     Args:
         rng: numpy random Generator for reproducibility
-        n_hiders: number of hiders (fixed to 2 for compatibility)
-        n_seekers: number of seekers (fixed to 2 for compatibility)
-        n_boxes: number of boxes (None = random 2-5)
-        n_ramps: number of ramps (None = random 0-2)
+        n_hiders: number of hiders
+        n_seekers: number of seekers
+        n_boxes: exact number of boxes (overrides n_boxes_range)
+        n_ramps: exact number of ramps (overrides n_ramps_range)
+        n_boxes_range: (min, max) inclusive range for random box count (curriculum)
+        n_ramps_range: (min, max) inclusive range for random ramp count (curriculum)
+        allowed_layouts: list of allowed layout types for curriculum control
 
     Returns:
         (xml_string, metadata_dict) where metadata contains spawn positions
@@ -616,18 +634,22 @@ def generate_arena(
 
     A = ARENA_HALF
 
-    # ── Random layout ──
-    layout = _gen_layout(rng)
+    # ── Random layout (optionally curriculum-filtered) ──
+    layout = _gen_layout(rng, allowed_layouts=allowed_layouts)
 
-    # ── Random object counts ──
+    # ── Random object counts (curriculum-aware) ──
     is_open = layout["layout_type"] == "open"
     if n_boxes is None:
-        if is_open:
+        if n_boxes_range is not None:
+            n_boxes = int(rng.integers(n_boxes_range[0], n_boxes_range[1] + 1))
+        elif is_open:
             n_boxes = int(rng.integers(4, 6))   # 4-5 boxes on open maps
         else:
             n_boxes = int(rng.integers(2, 6))   # 2-5 boxes otherwise
     if n_ramps is None:
-        if is_open:
+        if n_ramps_range is not None:
+            n_ramps = int(rng.integers(n_ramps_range[0], n_ramps_range[1] + 1))
+        elif is_open:
             n_ramps = int(rng.integers(1, 3))   # 1-2 ramps on open maps
         else:
             n_ramps = int(rng.integers(0, 3))   # 0-2 ramps otherwise

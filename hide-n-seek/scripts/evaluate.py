@@ -29,7 +29,7 @@ os.chdir(_PROJECT_ROOT)
 
 from env import HideAndSeekEnv, HIDER_NAMES, SEEKER_NAMES, AGENT_NAMES
 from mappo import TeamPolicy
-from config import ENV_CONFIG, MAPPO_CONFIG
+from config import ENV_CONFIG, MAPPO_CONFIG, CURRICULUM_PHASES
 
 
 # ─── Minimal color helpers for terminal summary lines ──────────────────────
@@ -59,6 +59,8 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--no_procedural", action="store_true",
                         help="Use static XML arena instead of procedural generation")
+    parser.add_argument("--curriculum_phase", type=int, default=None,
+                        help="Curriculum phase (1/2/3) — sets correct network architecture")
     return parser.parse_args()
 
 
@@ -67,10 +69,21 @@ def evaluate(args):
     if args.random and not args.record:
         render_mode = "human"
 
+    # Apply curriculum phase environment constraints if specified
+    env_kwargs = {}
+    if args.curriculum_phase and args.curriculum_phase in CURRICULUM_PHASES:
+        phase = CURRICULUM_PHASES[args.curriculum_phase]
+        env_kwargs["allowed_layouts"] = phase.get("allowed_layouts")
+        env_kwargs["n_boxes_range"] = phase.get("n_boxes_range")
+        env_kwargs["n_ramps_range"] = phase.get("n_ramps_range")
+        if "horizon" in phase:
+            args.horizon = phase["horizon"]
+
     env = HideAndSeekEnv(
         horizon=args.horizon,
         render_mode=render_mode,
         procedural=not args.no_procedural,
+        **env_kwargs,
     )
 
     hider_policy = None
@@ -82,13 +95,19 @@ def evaluate(args):
         act_dim = 3
         global_state_dim = info["global_state"].shape[0]
 
+        # Use curriculum phase architecture if specified
+        cfg = MAPPO_CONFIG
+        if args.curriculum_phase and args.curriculum_phase in CURRICULUM_PHASES:
+            phase = CURRICULUM_PHASES[args.curriculum_phase]
+            cfg = {**cfg, **{k: phase[k] for k in ("hidden_dim", "attn_embed_dim", "attn_n_heads", "attn_n_layers") if k in phase}}
+
         policy_config = {
-            "hidden_dim": MAPPO_CONFIG["hidden_dim"],
-            "n_layers": MAPPO_CONFIG["n_layers"],
-            "use_feature_norm": MAPPO_CONFIG["use_feature_norm"],
-            "attn_embed_dim": MAPPO_CONFIG.get("attn_embed_dim", 128),
-            "attn_n_heads": MAPPO_CONFIG.get("attn_n_heads", 4),
-            "attn_n_layers": MAPPO_CONFIG.get("attn_n_layers", 2),
+            "hidden_dim": cfg["hidden_dim"],
+            "n_layers": cfg["n_layers"],
+            "use_feature_norm": cfg["use_feature_norm"],
+            "attn_embed_dim": cfg.get("attn_embed_dim", 128),
+            "attn_n_heads": cfg.get("attn_n_heads", 4),
+            "attn_n_layers": cfg.get("attn_n_layers", 2),
         }
 
         hider_policy = TeamPolicy("hiders", obs_dim, act_dim, global_state_dim,

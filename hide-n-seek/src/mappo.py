@@ -37,16 +37,22 @@ class ValueNormalizer:
     This is critical for MAPPO — without it, the critic sees returns
     with wildly different scales and can't learn effectively.
     See: Yu et al. (2021) "The Surprising Effectiveness of PPO"
+
+    Supports a warmup period: during warmup, normalize() returns raw values
+    so the critic learns on the true scale before the running stats stabilise.
     """
 
-    def __init__(self, clip: float = 10.0):
+    def __init__(self, clip: float = 10.0, warmup_updates: int = 0):
         self.mean = 0.0
         self.var = 1.0
         self.count = 1e-4
         self.clip = clip
+        self.warmup_updates = warmup_updates
+        self._update_count = 0
 
     def update(self, values: np.ndarray):
         """Update running statistics with a batch of values."""
+        self._update_count += 1
         batch_mean = values.mean()
         batch_var = values.var()
         batch_count = len(values)
@@ -61,7 +67,10 @@ class ValueNormalizer:
         self.count = total_count
 
     def normalize(self, values: np.ndarray) -> np.ndarray:
-        """Normalize values to zero mean, unit variance."""
+        """Normalize values to zero mean, unit variance.
+        During warmup, returns raw values (no normalization)."""
+        if self._update_count < self.warmup_updates:
+            return values
         std = np.sqrt(self.var + 1e-8)
         return np.clip((values - self.mean) / std, -self.clip, self.clip)
 
@@ -524,7 +533,8 @@ class TeamPolicy:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic, eps=1e-5)
 
         # Value normalizer — critical for stable critic training
-        self.value_normalizer = ValueNormalizer()
+        warmup = config.get("value_norm_warmup_rounds", 0)
+        self.value_normalizer = ValueNormalizer(warmup_updates=warmup)
 
         # Per-agent rollout buffers (keys can be strings or tuples)
         self.buffers: dict = {}
@@ -620,9 +630,9 @@ class TeamPolicy:
         adv_mean, adv_std = all_adv.mean(), all_adv.std() + 1e-8
 
         # PPO update epochs
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
+        total_policy_loss = torch.tensor(0.0, device=self.device)
+        total_value_loss = torch.tensor(0.0, device=self.device)
+        total_entropy = torch.tensor(0.0, device=self.device)
         n_updates = 0
 
         for epoch in range(self.ppo_epochs):
@@ -671,41 +681,25 @@ class TeamPolicy:
                     # Total loss
                     loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
 
-                    # ── Skip update if loss is NaN ──
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        self.actor_optimizer.zero_grad()
-                        self.critic_optimizer.zero_grad()
-                        continue
-
-                    # Update actor
+                    # Update actor & critic
                     self.actor_optimizer.zero_grad()
                     self.critic_optimizer.zero_grad()
                     loss.backward()
 
-                    # ── Check for NaN gradients and skip if found ──
-                    has_nan_grad = False
-                    for p in self.actor.parameters():
-                        if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
-                            has_nan_grad = True
-                            break
-                    if not has_nan_grad:
-                        for p in self.critic.parameters():
-                            if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
-                                has_nan_grad = True
-                                break
-                    if has_nan_grad:
+                    # ── Check for NaN grads via total norm (single sync) ──
+                    actor_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    critic_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                    if torch.isnan(actor_norm) or torch.isinf(actor_norm) or \
+                       torch.isnan(critic_norm) or torch.isinf(critic_norm):
                         self.actor_optimizer.zero_grad()
                         self.critic_optimizer.zero_grad()
                         continue
-
-                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.actor_optimizer.step()
                     self.critic_optimizer.step()
 
-                    total_policy_loss += policy_loss.item()
-                    total_value_loss += value_loss.item()
-                    total_entropy += entropy.mean().item()
+                    total_policy_loss += policy_loss.detach()
+                    total_value_loss += value_loss.detach()
+                    total_entropy += entropy.mean().detach()
                     n_updates += 1
 
         # Clear buffers
@@ -716,9 +710,9 @@ class TeamPolicy:
             return {}
 
         return {
-            "policy_loss": total_policy_loss / n_updates,
-            "value_loss": total_value_loss / n_updates,
-            "entropy": total_entropy / n_updates,
+            "policy_loss": (total_policy_loss / n_updates).item(),
+            "value_loss": (total_value_loss / n_updates).item(),
+            "entropy": (total_entropy / n_updates).item(),
         }
 
     def save(self, path: str):
