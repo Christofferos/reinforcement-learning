@@ -7,7 +7,7 @@
 ```bash
 # Create virtual environment (recommended)
 python -m venv venv
-venv\Scripts\activate  # Windows
+venv/Scripts/activate  # Windows
 source venv/bin/activate  # Linux/Mac
 
 # Install
@@ -44,8 +44,10 @@ tensorboard --logdir runs/
 ```bash
 # Evaluate trained model
 python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --checkpoint ep20000 --n_episodes 5 --slow
+```
 
-# Record trained model
+### 6. Record video
+```bash
 python scripts/evaluate.py --model_dir models/hideseek_mappo_XXXXXXXX --record --checkpoint ep20000 --n_episodes 5 --slow
 ```
 

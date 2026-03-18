@@ -116,11 +116,19 @@ ENV_CONFIG = {
     "shape_hider_occluded": 0.03,      # hider play bonus per blocked seeker LOS
     "shape_hider_seen_proximity": 0.05,# hider play penalty when seen (scaled by closeness)
     "shape_hider_move_when_seen": 0.02,# hider play bonus for moving while visible
+    "shape_hider_rotate_object": 0.01,  # hider bonus for rotating grabbed objects
+    "shape_hider_rotate_when_seen": 0.03, # boosted rotation reward when seen (blockade building)
+    "shape_hider_perpendicular": 0.03,   # hider bonus for moving perpendicular to seeker LOS when seen
+    "shape_hider_flee_boost": 0.04,      # hider bonus for increasing distance from seeker when seen
     "shape_seeker_dist_to_hider": 0.05,# seeker play bonus: chase hiders
     "shape_seeker_coverage": 0.03,     # seeker bonus per new 2m×2m cell visited
     "shape_seeker_team_coverage": 0.02,# extra bonus when cell is new for whole team
     "shape_seeker_center_post_prep": 0.03, # seeker bonus for approaching center after prep
     "shape_individual_blend": 0.4,     # fraction of per-agent reward blended in (was 0.25)
+
+    # Level design
+    "perimeter_gap": 1.5,                # gap between interior walls and outer walls for escape routes
+    "perimeter_gap_prob": 0.7,           # probability of adding escape gap to each wall end
 
     # Actions
     "movement_scale": 1.0,        # max force applied per step

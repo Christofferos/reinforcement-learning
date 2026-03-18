@@ -378,6 +378,11 @@ def _ramp_xml(idx: int, x: float, y: float, yaw: float = 0.0,
 # This prevents pockets that trap agents.
 _WALL_GAP = 1.2
 
+# Perimeter escape gap: interior walls near outer walls get shortened
+# to create a corridor along the arena perimeter for fleeing.
+_PERIMETER_GAP = 1.5     # metres — gap between interior wall end and outer wall
+_PERIMETER_GAP_PROB = 0.7  # probability of adding a gap at each wall end
+
 
 def _gen_layout(rng: Generator,
                 allowed_layouts: list[str] | None = None) -> dict:
@@ -550,6 +555,37 @@ def _gen_layout(rng: Generator,
                         (-A + 0.5, vx - 0.5, -A + 0.5, hy - 0.5)]
         seeker_zones = [(-A + 0.5, vx - 0.5, hy + 0.5, A - 0.5),
                         (vx + 1.0, A - 0.5, hy + 0.5, A - 0.5)]
+
+    # ── Apply perimeter escape gaps ──
+    # For each wall that touches the outer arena boundary, randomly shorten it
+    # to create a passable corridor along the perimeter.  This gives hiders
+    # escape routes when spotted inside a room.
+    trimmed_walls = []
+    for orientation, pos, start, end, door_positions, door_width in walls:
+        new_start, new_end = start, end
+        # Check if start touches outer wall (-A)
+        if abs(start - (-A)) < 0.3 and rng.random() < _PERIMETER_GAP_PROB:
+            new_start = -A + _PERIMETER_GAP
+        # Check if end touches outer wall (A)
+        if abs(end - A) < 0.3 and rng.random() < _PERIMETER_GAP_PROB:
+            new_end = A - _PERIMETER_GAP
+        # Ensure wall is still long enough to matter (min ~2m)
+        if new_end - new_start >= 2.0:
+            # Filter door positions to only those within new wall span
+            valid_doors = [d for d in door_positions
+                           if new_start + 0.5 < d < new_end - 0.5]
+            # Ensure at least one door if none remain
+            if not valid_doors and (new_end - new_start) > door_width + 1.0:
+                valid_doors = [float(rng.uniform(new_start + 0.8, new_end - 0.8))]
+            trimmed_walls.append((orientation, pos, new_start, new_end,
+                                  valid_doors, door_width))
+        # else: wall too short after trimming — drop it entirely (more open layout)
+    walls = trimmed_walls
+
+    # ── Randomly swap team spawn sides (50%) ──
+    # Prevents hiders from learning a directional bias (e.g. "south = safe").
+    if rng.random() < 0.5:
+        hider_zones, seeker_zones = seeker_zones, hider_zones
 
     return {
         "walls": walls,
