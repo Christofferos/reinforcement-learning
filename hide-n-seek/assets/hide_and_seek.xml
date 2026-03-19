@@ -77,7 +77,7 @@
 
   <!-- ═══════════════════ VISUAL ═══════════════════ -->
   <visual>
-    <global offwidth="1280" offheight="720"/>
+    <global offwidth="1920" offheight="1080"/>
     <quality shadowsize="4096"/>
     <headlight ambient="0.35 0.35 0.38" diffuse="0.30 0.30 0.33" specular="0.08 0.08 0.08"/>
   </visual>

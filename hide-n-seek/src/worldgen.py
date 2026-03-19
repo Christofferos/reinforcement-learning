@@ -149,7 +149,7 @@ _XML_HEADER = """\
 {mesh_assets}
   </asset>
   <visual>
-    <global offwidth="1280" offheight="720"/>
+    <global offwidth="1920" offheight="1080"/>
     <quality shadowsize="4096"/>
     <headlight {headlight}/>
   </visual>

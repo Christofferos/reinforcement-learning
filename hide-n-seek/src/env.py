@@ -1423,7 +1423,7 @@ class HideAndSeekEnv(gym.Env):
         import mujoco.viewer  # ensure sub-module is loaded; also satisfies Python scoping
 
         if self.render_mode == "rgb_array":
-            renderer = mujoco.Renderer(self.model, height=720, width=1280)
+            renderer = mujoco.Renderer(self.model, height=1080, width=1920)
             # Use the zoomed-out "overview" camera defined in the XML
             cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
             renderer.update_scene(self.data, camera=cam_id)

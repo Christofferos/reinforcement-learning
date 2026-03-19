@@ -17,6 +17,7 @@ import time
 import argparse
 import numpy as np
 import torch
+import mujoco
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -69,9 +70,8 @@ def parse_args():
 
 
 def evaluate(args):
-    render_mode = "rgb_array" if args.record else "human"
-    if args.random and not args.record:
-        render_mode = "human"
+    # Always use human viewer so we can watch live; record frames separately
+    render_mode = "human"
 
     # Apply curriculum phase environment constraints if specified
     env_kwargs = {}
@@ -219,10 +219,17 @@ def evaluate(args):
                 line = f"  {step:3d} {phase} | H:{h_tot:+5.2f} S:{s_tot:+5.2f} | {' '.join(parts)}"
                 print(line)
 
-            if args.record and render_mode == "rgb_array":
-                frame = env.render()
-                if frame is not None:
-                    frames.append(frame)
+            if args.record:
+                recorder = mujoco.Renderer(env.model, height=1080, width=1920)
+                cam = mujoco.MjvCamera()
+                cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                cam.distance = 16.8
+                cam.elevation = -50.0
+                cam.azimuth = 90.0
+                cam.lookat[:] = [0.0, 0.0, 0.0]
+                recorder.update_scene(env.data, camera=cam)
+                frames.append(recorder.render())
+                recorder.close()
 
             step += 1
 
@@ -282,8 +289,8 @@ def evaluate(args):
     if args.record and frames:
         import imageio
         video_path = "hide_and_seek_eval.mp4"
-        imageio.mimwrite(video_path, frames, fps=30)
-        print(f"\n[Video] Saved to {video_path}")
+        imageio.mimwrite(video_path, frames, fps=60)
+        print(f"\n[Video] Saved to {video_path} ({len(frames)} frames, 1920x1080 @ 60fps)")
 
     env.close()
 
