@@ -61,6 +61,10 @@ def parse_args():
                         help="Use static XML arena instead of procedural generation")
     parser.add_argument("--curriculum_phase", type=int, default=None,
                         help="Curriculum phase (1/2/3) — sets correct network architecture")
+    parser.add_argument("--reward_log", action="store_true",
+                        help="Print per-episode reward shaping breakdown table")
+    parser.add_argument("--reward_live", action="store_true",
+                        help="Print live per-step reward breakdown during playback")
     return parser.parse_args()
 
 
@@ -139,6 +143,20 @@ def evaluate(args):
 
     frames = []
 
+    # ── Pause support: spacebar toggles pause in the MuJoCo viewer ──
+    paused = [False]  # mutable container so the callback can modify it
+
+    def _on_key(keycode):
+        # Spacebar = 32 in GLFW
+        if keycode == 32:
+            paused[0] = not paused[0]
+            state = "PAUSED" if paused[0] else "RESUMED"
+            print(f"  [{state}] Press Space in viewer to {'resume' if paused[0] else 'pause'}")
+
+    # Set callback on env BEFORE the first render creates the viewer
+    env._key_callback = _on_key
+    print(f"  {DIM}[i] Press Space in viewer to pause/resume{RESET}")
+
     for ep in range(1, args.n_episodes + 1):
         obs, info = env.reset()
         global_state = info["global_state"]
@@ -147,6 +165,7 @@ def evaluate(args):
         n_boxes = info.get("n_boxes", "?")
         n_ramps = info.get("n_ramps", "?")
         ep_reward = {name: 0.0 for name in AGENT_NAMES}
+        ep_breakdown = {name: {} for name in AGENT_NAMES}
 
         done = False
         step = 0
@@ -171,6 +190,35 @@ def evaluate(args):
             for name in AGENT_NAMES:
                 ep_reward[name] += rewards[name]
 
+            # Accumulate reward breakdown per agent
+            if (args.reward_log or args.reward_live) and "reward_breakdown" in info:
+                for name in AGENT_NAMES:
+                    for key, val in info["reward_breakdown"].get(name, {}).items():
+                        ep_breakdown[name][key] = ep_breakdown[name].get(key, 0.0) + val
+
+            # Live per-step reward readout
+            if args.reward_live and "reward_breakdown" in info:
+                bd = info["reward_breakdown"]
+                phase = "PREP" if info.get("prep_phase", False) else "PLAY"
+                # Collect non-zero components across all agents this step
+                active = {}
+                for name in AGENT_NAMES:
+                    for key, val in bd.get(name, {}).items():
+                        if abs(val) > 1e-4:
+                            if key not in active:
+                                active[key] = {}
+                            tag = ("H" if name in HIDER_NAMES else "S") + name[-1]
+                            active[key][tag] = val
+                # Build compact line
+                parts = []
+                for key in sorted(active):
+                    agents_str = " ".join(f"{t}:{v:+.3f}" for t, v in sorted(active[key].items()))
+                    parts.append(f"{key}[{agents_str}]")
+                h_tot = sum(rewards.get(n, 0) for n in HIDER_NAMES)
+                s_tot = sum(rewards.get(n, 0) for n in SEEKER_NAMES)
+                line = f"  {step:3d} {phase} | H:{h_tot:+5.2f} S:{s_tot:+5.2f} | {' '.join(parts)}"
+                print(line)
+
             if args.record and render_mode == "rgb_array":
                 frame = env.render()
                 if frame is not None:
@@ -180,6 +228,13 @@ def evaluate(args):
 
             if args.slow:
                 time.sleep(args.step_delay)
+
+            # Pause support: spin-wait while paused, keep viewer alive
+            while paused[0]:
+                viewer = getattr(env, '_viewer_handle', None)
+                if viewer is not None:
+                    viewer.sync()
+                time.sleep(0.05)
 
             done = all(truncated.get(n, False) or terminated.get(n, False) for n in AGENT_NAMES)
 
@@ -191,6 +246,38 @@ def evaluate(args):
         print(f"  Episode {ep:3d} | {step:3d} steps | "
               f"{CYAN}H: {hider_rew:+7.1f}{RESET} | "
               f"{RED}S: {seeker_rew:+7.1f}{RESET} | {winner} | {layout_tag}")
+
+        # ── Reward breakdown table ──
+        if args.reward_log:
+            # Collect all component keys across all agents
+            all_keys = sorted({k for bd in ep_breakdown.values() for k in bd})
+            if all_keys:
+                # Header
+                name_w = max(len(n) for n in AGENT_NAMES)
+                print(f"    {'component':<22s}", end="")
+                for name in AGENT_NAMES:
+                    tag = "H" if name in HIDER_NAMES else "S"
+                    print(f"  {tag}:{name[-1]:>1s}", end="")
+                print()
+                print(f"    {'-'*22}", end="")
+                for _ in AGENT_NAMES:
+                    print(f"  {'-'*6}", end="")
+                print()
+                for key in all_keys:
+                    print(f"    {key:<22s}", end="")
+                    for name in AGENT_NAMES:
+                        v = ep_breakdown[name].get(key, 0.0)
+                        print(f"  {v:+6.2f}", end="")
+                    print()
+                # Total row
+                print(f"    {'-'*22}", end="")
+                for _ in AGENT_NAMES:
+                    print(f"  {'-'*6}", end="")
+                print()
+                print(f"    {'TOTAL':<22s}", end="")
+                for name in AGENT_NAMES:
+                    print(f"  {ep_reward[name]:+6.1f}", end="")
+                print("\n")
 
     if args.record and frames:
         import imageio

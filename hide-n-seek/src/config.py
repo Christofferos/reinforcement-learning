@@ -60,11 +60,11 @@ CURRICULUM_PHASES = {
         "allowed_layouts": ["divider", "cross", "L_shape", "rooms"],
         "horizon": 240,
         "prep_fraction": 0.4,
-        # Full-size networks for 2v2 coordination
-        "attn_embed_dim": 128,
-        "attn_n_heads": 4,
-        "attn_n_layers": 2,
-        "hidden_dim": 256,
+        # Same network arch as Phase 1 & 2 so weights transfer
+        "attn_embed_dim": 64,
+        "attn_n_heads": 2,
+        "attn_n_layers": 1,
+        "hidden_dim": 128,
         "entropy_coef_start": 0.02,
         "entropy_coef_end": 0.005,
         "suggested_episodes": 20_000,

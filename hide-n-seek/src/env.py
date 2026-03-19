@@ -83,34 +83,36 @@ _PREP_RGBA = np.array([0.45, 0.45, 0.50, 0.6], dtype=np.float32)
 # These are strong enough to guide early learning but the base ±1 game
 # reward (× 144 play-phase steps) still dominates once strategies emerge.
 
-# -- Prep phase (hiders only) --
-SHAPE_PREP_MOVEMENT    = 0.03    # hider bonus per unit speed during prep  (bumped: speed ~0.1 → ~0.003/step)
-SHAPE_GRAB_AND_MOVE    = 0.02    # bonus per step for grabbing + moving an object
-SHAPE_HIDER_NEAR_COVER = 0.04    # hider bonus if lidar sees wall nearby
-SHAPE_PREP_NEAR_OBJECT = 0.02    # hider bonus if within 2m of a box/ramp
-SHAPE_BOX_TOWARD_WALL  = 0.08    # hider bonus for pushing grabbed box closer to a wall (bumped: deltas are tiny)
+# -- Prep phase (Hiders only) --
+SHAPE_PREP_MOVEMENT    = 0.50    # hider bonus per unit speed
+SHAPE_PREP_NEAR_MOVABLE_OBJECT = 0.04    # hider bonus if lidar sees a box/ramp nearby
+SHAPE_PREP_HIDER_NEAR_INTERIOR_WALL = 0.02    # hider bonus if lidar sees inner wall nearby
+SHAPE_PREP_BOX_TOWARD_WALL  = 0.80    # hider bonus for pushing grabbed box closer to a wall
+
+# -- Both phases + Both teams --
+SHAPE_GRAB_AND_MOVE    = 0.10    # bonus per step for grabbing + moving an object
 
 # -- Play phase --
-SHAPE_HIDER_DIST_FROM_SEEKER = 0.02   # hider bonus: normalized dist to nearest seeker (was 0.05, caused "run to corner")
-SHAPE_HIDER_OCCLUDED         = 0.05   # hider bonus per seeker whose LOS is blocked (was 0.03, now clearly dominant)
-SHAPE_HIDER_SEEN_PROXIMITY   = 0.05   # hider penalty when seen, scaled by proximity
-SHAPE_SEEKER_DIST_TO_HIDER   = 0.02   # seeker bonus: closeness to nearest hider (lowered to match hider dist)
-SHAPE_SEEKER_COVERAGE        = 0.03   # seeker bonus per new 2m×2m cell visited
-SHAPE_SEEKER_TEAM_COVERAGE   = 0.02   # extra bonus when cell is new for the WHOLE team
-SHAPE_HIDER_MOVE_WHEN_SEEN   = 0.08   # hider bonus for moving while visible (was 0.02, scaled for small displacements)
-SHAPE_HIDER_ROTATE_OBJECT    = 0.01   # hider bonus for rotating grabbed objects
-SHAPE_HIDER_ROTATE_WHEN_SEEN = 0.03   # boosted rotation reward when seen (blockade building)
-SHAPE_HIDER_PERPENDICULAR    = 0.06   # hider bonus for perpendicular movement when seen (was 0.03, scaled for displacements)
-SHAPE_HIDER_FLEE_BOOST       = 0.08   # hider bonus for increasing distance when seen (was 0.04, scaled for displacements)
-SHAPE_SEEKER_CENTER_POST_PREP = 0.10  # seeker bonus for moving toward center after prep (was 0.03, was negligible)
+SHAPE_HIDER_OCCLUDED         = 0.10   # hider bonus per seeker whose LOS is blocked
+SHAPE_HIDER_MOVE_WHEN_SEEN   = 0.80   # hider bonus for moving while visible
+SHAPE_HIDER_SEEN_PROXIMITY   = 0.10   # hider penalty when seen, scaled by proximity
+SHAPE_HIDER_ROTATE_OBJECT    = 1.00   # hider bonus for rotating grabbed objects
+SHAPE_HIDER_ROTATE_WHEN_SEEN = 0.80   # boosted rotation reward when seen (blockade building)
+SHAPE_HIDER_PERPENDICULAR    = 4.00   # hider bonus for perpendicular movement when seen
+SHAPE_SEEKER_CENTER_POST_PREP = 2.50  # seeker bonus for moving toward center after prep
+SHAPE_SEEKER_COVERAGE        = 0.20   # seeker bonus per new 2m×2m cell visited
+SHAPE_SEEKER_TEAM_COVERAGE   = 0.40   # extra bonus when cell is new for the WHOLE team
+SHAPE_SEEKER_DIST_TO_SEEN_HIDER   = 0.20   # seeker bonus for closeness to nearest hider
+
+# -- Agent reward share from teammate --
+SHAPE_INDIVIDUAL_BLEND = 0.4    # fraction of per-agent reward blended in (was 0.25)
+
+# -- Helper constants --
 _SEEKER_CENTER_WINDOW        = 30     # number of play-phase steps the center bonus lasts
 _COVERAGE_CELL_SIZE          = 2.0    # metres per grid cell (12m arena → 6×6 grid)
 _ARENA_HALF                  = 6.0    # half-width of arena (for cell index clamping)
-
-# -- Blending --
-SHAPE_INDIVIDUAL_BLEND = 0.4    # fraction of per-agent reward blended in (was 0.25)
-
-_COVER_LIDAR_THRESHOLD = 2.0 / 18.0  # 2.0m / lidar_max_dist (normalised)
+_COVER_DIST_THRESHOLD  = 2.0   # metres — near-cover bonus radius (interior walls + objects only)
+_COVER_CLOSE_DIST      = 0.1   # metres — distance at which near-cover bonus is maximal
 _GRAB_MOVE_VEL_THRESH  = 0.05  # min object velocity (m/step) to count as "moving"
 _NEAR_OBJECT_DIST      = 2.0   # metres — prep "near object" threshold
 _ARENA_DIAGONAL        = 17.0  # 12m × 12m arena diagonal for normalization
@@ -345,6 +347,7 @@ class HideAndSeekEnv(gym.Env):
         self.render_mode = render_mode
         self._renderer = None
         self._viewer_handle = None
+        self._key_callback = None  # optional GLFW key callback for viewer
         if render_mode == "human":
             self._init_renderer()
 
@@ -397,6 +400,18 @@ class HideAndSeekEnv(gym.Env):
         for name in self._cur_box_names:
             self._box_body_ids[name] = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
             self._box_geom_ids[name] = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{name}_geom")
+
+        # Interior walls — procedural: wall_0, wall_1, ... ; static: vwall_*, hwall_*
+        _OUTER_WALL_NAMES = {"wall_north", "wall_south", "wall_east", "wall_west"}
+        self._interior_wall_body_ids = []
+        for bid in range(self.model.nbody):
+            bname = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, bid)
+            if bname is None:
+                continue
+            if bname in _OUTER_WALL_NAMES:
+                continue
+            if bname.startswith("wall_") or bname.startswith("vwall_") or bname.startswith("hwall_"):
+                self._interior_wall_body_ids.append(bid)
 
         # Ramps — only those present in current model
         self._cur_ramp_names = [f"ramp_{i}" for i in range(self._cur_n_ramps)]
@@ -639,6 +654,25 @@ class HideAndSeekEnv(gym.Env):
                 10. Individual blend (20% per-agent, 80% team)
         """
         rewards = {name: 0.0 for name in AGENT_NAMES}
+
+        # All known breakdown keys — pre-initialised to 0 so every component
+        # appears in the log even when it doesn't fire this step.
+        _HIDER_KEYS = [
+            "prep_movement", "near_cover", "near_object", "box_toward_wall",
+            "grab_move", "dist_from_seeker", "occluded", "seen_proximity",
+            "move_when_seen", "rotate_obj", "rotate_seen", "perpendicular",
+            "flee_boost", "base",
+        ]
+        _SEEKER_KEYS = [
+            "grab_move", "dist_to_hider", "coverage", "team_coverage",
+            "center_post_prep", "base",
+        ]
+        breakdown = {}
+        for name in HIDER_NAMES:
+            breakdown[name] = {k: 0.0 for k in _HIDER_KEYS}
+        for name in SEEKER_NAMES:
+            breakdown[name] = {k: 0.0 for k in _SEEKER_KEYS}
+
         in_prep = self.current_step < self.prep_steps
 
         # ── Visibility analysis ──
@@ -699,62 +733,68 @@ class HideAndSeekEnv(gym.Env):
                 name = HIDER_NAMES[hi]
 
                 # SHAPING 1: Movement bonus during prep
-                rewards[name] += SHAPE_PREP_MOVEMENT * agent_speed[name]
+                val = SHAPE_PREP_MOVEMENT * agent_speed[name]
+                rewards[name] += val
+                breakdown[name]["prep_movement"] = breakdown[name].get("prep_movement", 0.0) + val
 
-        # ══════════════════════════════════════════
-        # HIDER COVER / OBJECT PROXIMITY (both phases, only when NOT seen)
-        # ══════════════════════════════════════════
-        for hi in range(N_HIDERS):
-            name = HIDER_NAMES[hi]
-            if hider_is_seen[hi]:
-                continue  # no point rewarding cover if already detected
-
-            # SHAPING 2: Near cover (wall within threshold via lidar)
-            body_id = self._agent_body_ids[name]
-            pos3d = self._get_body_pos(body_id)
-            lidar = _compute_lidar(
-                self.model, self.data, pos3d,
-                self.lidar_n_rays, self.lidar_max_dist,
-                bodyexclude=body_id,
-                exclude_geom_ids=self._all_agent_geom_ids,
-            )
-            min_reading = float(np.min(lidar))
-            if min_reading < _COVER_LIDAR_THRESHOLD:
-                rewards[name] += SHAPE_HIDER_NEAR_COVER
-
-            # SHAPING 3: Near objects (within 2m of any box or ramp)
-            hpos = agent_pos[name]
-            near_obj = False
-            for bi in range(self._cur_n_boxes):
-                if np.linalg.norm(hpos - cur_box_pos[bi]) < _NEAR_OBJECT_DIST:
-                    near_obj = True
-                    break
-            if not near_obj:
-                for ri in range(self._cur_n_ramps):
-                    if np.linalg.norm(hpos - cur_ramp_pos[ri]) < _NEAR_OBJECT_DIST:
-                        near_obj = True
-                        break
-            if near_obj:
-                rewards[name] += SHAPE_PREP_NEAR_OBJECT
-
-            # SHAPING 4: Box-toward-wall bonus during prep
-            # Reward hiders for pushing grabbed boxes closer to arena walls,
-            # which directly seeds barricade-building behaviour.
             for hi in range(N_HIDERS):
-                agent_idx_h = hi  # hider indices are 0..N_HIDERS-1
-                for bi in range(self._cur_n_boxes):
-                    if self.box_grabbed_by[bi] == agent_idx_h and box_moved[bi] > _GRAB_MOVE_VEL_THRESH:
-                        bx, by = cur_box_pos[bi]
-                        prev_bx, prev_by = self._prev_box_pos[bi]
-                        # Distance to nearest arena wall (outer wall at ±ARENA_HALF)
-                        cur_wall_dist = min(abs(bx - _ARENA_HALF), abs(bx + _ARENA_HALF),
-                                            abs(by - _ARENA_HALF), abs(by + _ARENA_HALF))
-                        prev_wall_dist = min(abs(prev_bx - _ARENA_HALF), abs(prev_bx + _ARENA_HALF),
-                                             abs(prev_by - _ARENA_HALF), abs(prev_by + _ARENA_HALF))
-                        # Bonus if box moved closer to any wall
-                        approach = prev_wall_dist - cur_wall_dist
-                        if approach > 0 and cur_wall_dist < _BOX_WALL_DIST_THRESH:
-                            rewards[HIDER_NAMES[hi]] += SHAPE_BOX_TOWARD_WALL * approach
+                name = HIDER_NAMES[hi]
+
+                # SHAPING 2: Near cover (distance to interior walls / boxes / ramps)
+                hpos = agent_pos[name]
+                min_cover_dist = _COVER_DIST_THRESHOLD  # sentinel
+                if not hider_is_seen[hi]:
+                    # Interior walls
+                    for wbid in self._interior_wall_body_ids:
+                        wpos = self.data.xpos[wbid, :2]
+                        d = np.linalg.norm(hpos - wpos)
+                        if d < min_cover_dist:
+                            min_cover_dist = d
+                    if min_cover_dist < _COVER_DIST_THRESHOLD:
+                        # Linear scale: 1.0 at ≤_COVER_CLOSE_DIST, 0.0 at _COVER_DIST_THRESHOLD
+                        t = max(min_cover_dist, _COVER_CLOSE_DIST)
+                        scale = 1.0 - (t - _COVER_CLOSE_DIST) / (_COVER_DIST_THRESHOLD - _COVER_CLOSE_DIST)
+                        val = SHAPE_PREP_HIDER_NEAR_INTERIOR_WALL * scale
+                        rewards[name] += val
+                        breakdown[name]["near_cover"] += val
+
+                # SHAPING 3: Near movable objects
+                hpos = agent_pos[name]
+                near_obj = False
+                if not hider_is_seen[hi]:
+                    for bi in range(self._cur_n_boxes):
+                        if np.linalg.norm(hpos - cur_box_pos[bi]) < _NEAR_OBJECT_DIST:
+                            near_obj = True
+                            break
+                    if not near_obj:
+                        for ri in range(self._cur_n_ramps):
+                            if np.linalg.norm(hpos - cur_ramp_pos[ri]) < _NEAR_OBJECT_DIST:
+                                near_obj = True
+                                break
+                    if near_obj:
+                        rewards[name] += SHAPE_PREP_NEAR_MOVABLE_OBJECT
+                        breakdown[name]["near_object"] = breakdown[name].get("near_object", 0.0) + SHAPE_PREP_NEAR_MOVABLE_OBJECT
+
+                # SHAPING 4: Box-toward-wall bonus during prep
+                # Reward hiders for pushing grabbed boxes closer to arena walls,
+                # which directly seeds barricade-building behaviour.
+                for hi in range(N_HIDERS):
+                    agent_idx_h = hi  # hider indices are 0..N_HIDERS-1
+                    for bi in range(self._cur_n_boxes):
+                        if self.box_grabbed_by[bi] == agent_idx_h and box_moved[bi] > _GRAB_MOVE_VEL_THRESH:
+                            bx, by = cur_box_pos[bi]
+                            prev_bx, prev_by = self._prev_box_pos[bi]
+                            # Distance to nearest arena wall (outer wall at ±ARENA_HALF)
+                            cur_wall_dist = min(abs(bx - _ARENA_HALF), abs(bx + _ARENA_HALF),
+                                                abs(by - _ARENA_HALF), abs(by + _ARENA_HALF))
+                            prev_wall_dist = min(abs(prev_bx - _ARENA_HALF), abs(prev_bx + _ARENA_HALF),
+                                                abs(prev_by - _ARENA_HALF), abs(prev_by + _ARENA_HALF))
+                            # Bonus if box moved closer to any wall
+                            approach = prev_wall_dist - cur_wall_dist
+                            if approach > 0 and cur_wall_dist < _BOX_WALL_DIST_THRESH:
+                                bw_val = SHAPE_PREP_BOX_TOWARD_WALL * approach
+                                rewards[HIDER_NAMES[hi]] += bw_val
+                                breakdown[HIDER_NAMES[hi]]["box_toward_wall"] = breakdown[HIDER_NAMES[hi]].get("box_toward_wall", 0.0) + bw_val
 
         # ══════════════════════════════════════════
         # SHAPING 5: Grab + move objects (both teams, both phases)
@@ -764,27 +804,21 @@ class HideAndSeekEnv(gym.Env):
             for bi in range(self._cur_n_boxes):
                 if self.box_grabbed_by[bi] == agent_idx and box_moved[bi] > _GRAB_MOVE_VEL_THRESH:
                     bonus += SHAPE_GRAB_AND_MOVE
+                elif self.box_grabbed_by[bi] == agent_idx:
+                    bonus += SHAPE_GRAB_AND_MOVE / 2.0
             for ri in range(self._cur_n_ramps):
                 if self.ramp_grabbed_by[ri] == agent_idx and ramp_moved[ri] > _GRAB_MOVE_VEL_THRESH:
                     bonus += SHAPE_GRAB_AND_MOVE
+                elif self.ramp_grabbed_by[ri] == agent_idx:
+                    bonus += SHAPE_GRAB_AND_MOVE / 2.0
             rewards[name] += bonus
+            if bonus > 0:
+                breakdown[name]["grab_move"] = breakdown[name].get("grab_move", 0.0) + bonus
 
         # ══════════════════════════════════════════
         # PLAY PHASE SHAPING
         # ══════════════════════════════════════════
         if not in_prep:
-            # ── SHAPING 6: Hider distance from nearest seeker (only when seen) ──
-            # Rewards being far from seekers, but ONLY when detected. When hidden,
-            # occlusion (SHAPING 7) is the correct signal — distance would punish
-            # good hiding spots near seekers and reward exposed far-corner positions.
-            for hi in range(N_HIDERS):
-                name = HIDER_NAMES[hi]
-                if not hider_is_seen[hi]:
-                    continue
-                min_dist = float(np.min(dist_hs[hi, :]))
-                norm_dist = min_dist / _ARENA_DIAGONAL  # 0..1
-                rewards[name] += SHAPE_HIDER_DIST_FROM_SEEKER * norm_dist
-
             # ── SHAPING 7: Hider occlusion bonus (per seeker whose LOS is blocked) ──
             for hi in range(N_HIDERS):
                 name = HIDER_NAMES[hi]
@@ -792,7 +826,9 @@ class HideAndSeekEnv(gym.Env):
                 for si in range(N_SEEKERS):
                     if not seeker_sees[si, hi]:
                         n_blocked += 1
-                rewards[name] += SHAPE_HIDER_OCCLUDED * n_blocked
+                val = SHAPE_HIDER_OCCLUDED * n_blocked
+                rewards[name] += val
+                breakdown[name]["occluded"] = breakdown[name].get("occluded", 0.0) + val
 
             # ── SHAPING 8: Hider proximity penalty when seen ──
             for hi in range(N_HIDERS):
@@ -800,13 +836,17 @@ class HideAndSeekEnv(gym.Env):
                 for si in range(N_SEEKERS):
                     if seeker_sees[si, hi]:
                         closeness = 1.0 - (dist_hs[hi, si] / _ARENA_DIAGONAL)
-                        rewards[name] -= SHAPE_HIDER_SEEN_PROXIMITY * max(closeness, 0.0)
+                        sp_val = SHAPE_HIDER_SEEN_PROXIMITY * max(closeness, 0.0)
+                        rewards[name] -= sp_val
+                        breakdown[name]["seen_proximity"] = breakdown[name].get("seen_proximity", 0.0) - sp_val
 
             # ── SHAPING 9: Hider bonus for moving while seen ──
             for hi in range(N_HIDERS):
                 name = HIDER_NAMES[hi]
                 if hider_is_seen[hi]:
-                    rewards[name] += SHAPE_HIDER_MOVE_WHEN_SEEN * agent_speed[name]
+                    val = SHAPE_HIDER_MOVE_WHEN_SEEN * agent_speed[name]
+                    rewards[name] += val
+                    breakdown[name]["move_when_seen"] = breakdown[name].get("move_when_seen", 0.0) + val
 
             # ── SHAPING 10: Hider rotation reward for grabbed objects ──
             # Encourages hiders to rotate objects to create blockades.
@@ -827,9 +867,13 @@ class HideAndSeekEnv(gym.Env):
                         rot_bonus += ang_vel_z
                 if rot_bonus > 0.0:
                     if hider_is_seen[hi]:
-                        rewards[name] += SHAPE_HIDER_ROTATE_WHEN_SEEN * rot_bonus
+                        val = SHAPE_HIDER_ROTATE_WHEN_SEEN * rot_bonus
+                        rewards[name] += val
+                        breakdown[name]["rotate_seen"] = breakdown[name].get("rotate_seen", 0.0) + val
                     else:
-                        rewards[name] += SHAPE_HIDER_ROTATE_OBJECT * rot_bonus
+                        val = SHAPE_HIDER_ROTATE_OBJECT * rot_bonus
+                        rewards[name] += val
+                        breakdown[name]["rotate_obj"] = breakdown[name].get("rotate_obj", 0.0) + val
 
             # ── SHAPING 11: Perpendicular movement to seeker LOS when seen ──
             # Moving sideways relative to a seeker's line of sight is an
@@ -859,33 +903,23 @@ class HideAndSeekEnv(gym.Env):
                     perp = h_vel - proj
                     perp_total += np.linalg.norm(perp)
                 if n_seeing > 0:
-                    rewards[name] += SHAPE_HIDER_PERPENDICULAR * (perp_total / n_seeing)
+                    val = SHAPE_HIDER_PERPENDICULAR * (perp_total / n_seeing)
+                    rewards[name] += val
+                    breakdown[name]["perpendicular"] = breakdown[name].get("perpendicular", 0.0) + val
 
-            # ── SHAPING 12: Flee boost — reward increasing distance when seen ──
-            # On top of the base distance reward, gives an explicit gradient
-            # for moving AWAY from each seeker that has detected this hider.
-            for hi in range(N_HIDERS):
-                name = HIDER_NAMES[hi]
-                if not hider_is_seen[hi]:
-                    continue
-                h_pos = agent_pos[name]
-                h_prev = self._prev_agent_pos[name]
-                for si in range(N_SEEKERS):
-                    if not seeker_sees[si, hi]:
-                        continue
-                    s_pos = seeker_positions[si]
-                    cur_dist = np.linalg.norm(h_pos - s_pos)
-                    prev_dist = np.linalg.norm(h_prev - s_pos)
-                    delta = cur_dist - prev_dist  # positive = moving away
-                    if delta > 0:
-                        rewards[name] += SHAPE_HIDER_FLEE_BOOST * delta
 
-            # ── SHAPING 13: Seeker distance to nearest hider (chase gradient) ──
+            # ── SHAPING 13: Seeker distance to nearest *visible* hider (chase gradient) ──
             for si in range(N_SEEKERS):
                 name = SEEKER_NAMES[si]
-                min_dist = float(np.min(dist_hs[:, si]))
+                # Only consider hiders this seeker can actually see
+                visible_dists = [dist_hs[hi, si] for hi in range(N_HIDERS) if seeker_sees[si, hi]]
+                if not visible_dists:
+                    continue
+                min_dist = min(visible_dists)
                 closeness = 1.0 - (min_dist / _ARENA_DIAGONAL)  # 0..1, higher = closer
-                rewards[name] += SHAPE_SEEKER_DIST_TO_HIDER * closeness
+                val = SHAPE_SEEKER_DIST_TO_SEEN_HIDER * closeness
+                rewards[name] += val
+                breakdown[name]["dist_to_hider"] = breakdown[name].get("dist_to_hider", 0.0) + val
 
             # ── SHAPING 14: Seeker coverage grid ──
             for si in range(N_SEEKERS):
@@ -901,9 +935,11 @@ class HideAndSeekEnv(gym.Env):
                 if cell not in self._seeker_visited_cells[si]:
                     self._seeker_visited_cells[si].add(cell)
                     rewards[name] += SHAPE_SEEKER_COVERAGE
+                    breakdown[name]["coverage"] = breakdown[name].get("coverage", 0.0) + SHAPE_SEEKER_COVERAGE
                     # Team coverage: extra bonus if neither seeker has visited this cell
                     if cell not in self._seeker_team_visited:
                         rewards[name] += SHAPE_SEEKER_TEAM_COVERAGE
+                        breakdown[name]["team_coverage"] = breakdown[name].get("team_coverage", 0.0) + SHAPE_SEEKER_TEAM_COVERAGE
                     self._seeker_team_visited.add(cell)
 
             # ── SHAPING 15: Seeker center bonus right after prep ends ──
@@ -917,7 +953,9 @@ class HideAndSeekEnv(gym.Env):
                     # Reward reduction in distance to center
                     approach = prev_dist_to_center - dist_to_center
                     if approach > 0:
-                        rewards[name] += SHAPE_SEEKER_CENTER_POST_PREP * approach
+                        ctr_val = SHAPE_SEEKER_CENTER_POST_PREP * approach
+                        rewards[name] += ctr_val
+                        breakdown[name]["center_post_prep"] = breakdown[name].get("center_post_prep", 0.0) + ctr_val
 
         # ══════════════════════════════════════════
         # BASE REWARD + INDIVIDUAL BLEND (play phase only)
@@ -935,13 +973,17 @@ class HideAndSeekEnv(gym.Env):
                 indiv = 1.0 if not hider_is_seen[hi] else -1.0
                 blended = ((1.0 - SHAPE_INDIVIDUAL_BLEND) * team_hider_rew +
                            SHAPE_INDIVIDUAL_BLEND * indiv)
-                rewards[HIDER_NAMES[hi]] += blended * self.reward_scale
+                base_val = blended * self.reward_scale
+                rewards[HIDER_NAMES[hi]] += base_val
+                breakdown[HIDER_NAMES[hi]]["base"] = base_val
 
             for si in range(N_SEEKERS):
                 indiv = 1.0 if seeker_sees_hider[si] else -1.0
                 blended = ((1.0 - SHAPE_INDIVIDUAL_BLEND) * team_seeker_rew +
                            SHAPE_INDIVIDUAL_BLEND * indiv)
-                rewards[SEEKER_NAMES[si]] += blended * self.reward_scale
+                base_val = blended * self.reward_scale
+                rewards[SEEKER_NAMES[si]] += base_val
+                breakdown[SEEKER_NAMES[si]]["base"] = base_val
 
         # ── Update tracking state for next step ──
         for name in AGENT_NAMES:
@@ -949,6 +991,7 @@ class HideAndSeekEnv(gym.Env):
         self._prev_box_pos[:] = cur_box_pos
         self._prev_ramp_pos[:] = cur_ramp_pos
 
+        self._reward_breakdown = breakdown
         return rewards
 
     # ──────────────────────────────────────────────
@@ -1198,6 +1241,7 @@ class HideAndSeekEnv(gym.Env):
         # Coverage grid: per-seeker visited cells + team-wide visited cells
         self._seeker_visited_cells = [set() for _ in range(N_SEEKERS)]
         self._seeker_team_visited = set()
+        self._reward_breakdown = {name: {} for name in AGENT_NAMES}
         # Previous box/ramp positions (for grab-and-move detection)
         self._prev_box_pos = np.zeros((MAX_BOXES, 2), dtype=np.float32)
         for bi in range(self._cur_n_boxes):
@@ -1285,6 +1329,7 @@ class HideAndSeekEnv(gym.Env):
             "prep_phase": self.current_step < self.prep_steps,
             "step": self.current_step,
             "visibility_matrix": vis_matrix,
+            "reward_breakdown": self._reward_breakdown,
         }
 
         # Update visual indicators every step (cheap numpy writes)
@@ -1387,9 +1432,13 @@ class HideAndSeekEnv(gym.Env):
             return pixels
         elif self.render_mode == "human":
             if self._viewer_handle is None:
-                self._viewer_handle = mujoco.viewer.launch_passive(
-                    self.model, self.data,
+                launch_kw = dict(
                     show_left_ui=False, show_right_ui=False,
+                )
+                if self._key_callback is not None:
+                    launch_kw["key_callback"] = self._key_callback
+                self._viewer_handle = mujoco.viewer.launch_passive(
+                    self.model, self.data, **launch_kw,
                 )
                 # Zoomed-out overview showing the full arena
                 self._viewer_handle.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
