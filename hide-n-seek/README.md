@@ -157,3 +157,9 @@ With sufficient training (~50M+ environment steps), the original paper observed 
 - [OpenAI's original environment code](https://github.com/openai/multi-agent-emergence-environments) (archived)
 - [PettingZoo documentation](https://pettingzoo.farama.org/)
 - [MuJoCo documentation](https://mujoco.readthedocs.io/)
+
+Issues with convergence in disfunctional hider states. Not fleeing, using strategies worse than randomness.
+<img width="1191" height="750" alt="image" src="https://github.com/user-attachments/assets/665f353b-d2d9-4b96-92d8-1463eab534f2" />
+<img width="1194" height="758" alt="image" src="https://github.com/user-attachments/assets/1618b4e4-99e4-4dbe-a608-a05e8de8bd9e" />
+
+
