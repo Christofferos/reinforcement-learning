@@ -94,11 +94,11 @@ SHAPE_GRAB_AND_MOVE    = 0.10    # bonus per step for grabbing + moving an objec
 
 # -- Play phase --
 SHAPE_HIDER_OCCLUDED         = 0.10   # hider bonus per seeker whose LOS is blocked
-SHAPE_HIDER_MOVE_WHEN_SEEN   = 0.80   # hider bonus for moving while visible
+SHAPE_HIDER_MOVE_WHEN_SEEN   = 1.00   # hider bonus for moving while visible
 SHAPE_HIDER_SEEN_PROXIMITY   = 0.10   # hider penalty when seen, scaled by proximity
 SHAPE_HIDER_ROTATE_OBJECT    = 1.00   # hider bonus for rotating grabbed objects
 SHAPE_HIDER_ROTATE_WHEN_SEEN = 0.80   # boosted rotation reward when seen (blockade building)
-SHAPE_HIDER_PERPENDICULAR    = 4.00   # hider bonus for perpendicular movement when seen
+SHAPE_HIDER_PERPENDICULAR    = 3.00   # hider bonus for perpendicular movement when seen
 SHAPE_SEEKER_CENTER_POST_PREP = 2.50  # seeker bonus for moving toward center after prep
 SHAPE_SEEKER_COVERAGE        = 0.20   # seeker bonus per new 2m×2m cell visited
 SHAPE_SEEKER_TEAM_COVERAGE   = 0.40   # extra bonus when cell is new for the WHOLE team

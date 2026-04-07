@@ -85,6 +85,8 @@ def parse_args():
     parser.add_argument("--n_episodes", type=int, default=None,
                         help="Total episodes across all envs (default: 20000, overridden by curriculum)")
     parser.add_argument("--ppo_epochs", type=int, default=MAPPO_CONFIG["ppo_epochs"])
+    parser.add_argument("--n_accum_rounds", type=int, default=MAPPO_CONFIG["n_accum_rounds"],
+                        help="Accumulate N rounds before PPO update (effective batch = n_envs × horizon × N)")
     parser.add_argument("--lr_actor", type=float, default=MAPPO_CONFIG["lr_actor"])
     parser.add_argument("--lr_critic", type=float, default=MAPPO_CONFIG["lr_critic"])
     parser.add_argument("--hidden_dim", type=int, default=None,
@@ -170,7 +172,7 @@ def train(args):
         if args.horizon is None:
             args.horizon = ENV_CONFIG["horizon"]
         if args.n_episodes is None:
-            args.n_episodes = 20_000
+            args.n_episodes = 2_000_000
         if args.hidden_dim is None:
             args.hidden_dim = MAPPO_CONFIG["hidden_dim"]
         if args.entropy_coef is not None:
@@ -216,6 +218,8 @@ def train(args):
     print(f"  Rollout rounds:   {n_rounds}")
     print(f"  Total episodes:   ~{total_episodes_planned}")
     print(f"  Steps/round:      {args.horizon} x {n_envs} = {args.horizon * n_envs}")
+    print(f"  Accum rounds:     {args.n_accum_rounds} (update every {args.n_accum_rounds} rounds)")
+    print(f"  Effective batch:  {args.horizon * n_envs * args.n_accum_rounds:,} steps/update")
     print(f"  Entropy:          {entropy_start:.4f} \u2192 {entropy_end:.4f} (linear decay)")
     print(f"  LR end factor:    {MAPPO_CONFIG.get('lr_end_factor', 0.1)}")
     print(f"{'='*60}\n")
@@ -449,6 +453,12 @@ def train(args):
             for _ in range(n_envs)
         ]
 
+        # Per-env per-agent reward breakdown accumulation
+        ep_reward_breakdown = [
+            {name: {} for name in AGENT_NAMES}
+            for _ in range(n_envs)
+        ]
+
         # Run for exactly `horizon` steps (all envs in lockstep)
         # Pre-compute team membership indices for fast slicing
         n_hiders = len(HIDER_NAMES)
@@ -519,6 +529,16 @@ def train(args):
                     )
                     ep_rewards[ei][name] += all_rewards[ei][name]
 
+            # Accumulate reward breakdown from this step
+            for ei in range(n_envs):
+                step_breakdown = all_info[ei].get("reward_breakdown", {})
+                for name in AGENT_NAMES:
+                    if name in step_breakdown:
+                        for comp, val in step_breakdown[name].items():
+                            ep_reward_breakdown[ei][name][comp] = (
+                                ep_reward_breakdown[ei][name].get(comp, 0.0) + val
+                            )
+
             all_obs = next_all_obs
             all_global_states = next_global_states
             total_steps += n_envs  # N envs stepped simultaneously
@@ -534,9 +554,15 @@ def train(args):
                   f"({sps:.0f} env-steps/s, "
                   f"{n_envs * args.horizon * 4 / max(round_dt, 1e-6):.0f} agent-steps/s)")
 
-        # ── Update policies (with N x more data than before) ──
-        hider_stats = hider_policy.update()
-        seeker_stats = seeker_policy.update()
+        # ── Accumulate N rounds before PPO update ──
+        # Effective batch = n_envs × horizon × n_accum_rounds
+        # 128 × 200 × 4 = 102,400  (≈ OpenAI's 115,200)
+        if round_num % args.n_accum_rounds == 0:
+            hider_stats = hider_policy.update()
+            seeker_stats = seeker_policy.update()
+        else:
+            hider_stats = {}
+            seeker_stats = {}
 
         # ── Periodic weight-NaN check (catches silent corruption early) ──
         if hider_policy.has_nan_weights() or seeker_policy.has_nan_weights():
@@ -583,6 +609,34 @@ def train(args):
         writer.add_scalar("lr/entropy_coef", current_entropy, round_num)
         writer.add_scalar("perf/round_time_s", round_dt, round_num)
         writer.add_scalar("perf/steps_per_sec", round_steps / max(round_dt, 1e-6), round_num)
+
+        # ── Reward breakdown per component (averaged across envs & agents) ──
+        hider_comp_sums = {}
+        seeker_comp_sums = {}
+        for ei in range(n_envs):
+            for name in HIDER_NAMES:
+                for comp, val in ep_reward_breakdown[ei][name].items():
+                    hider_comp_sums[comp] = hider_comp_sums.get(comp, 0.0) + val
+            for name in SEEKER_NAMES:
+                for comp, val in ep_reward_breakdown[ei][name].items():
+                    seeker_comp_sums[comp] = seeker_comp_sums.get(comp, 0.0) + val
+        n_hider_agents = n_envs * len(HIDER_NAMES)
+        n_seeker_agents = n_envs * len(SEEKER_NAMES)
+        for comp, total in hider_comp_sums.items():
+            writer.add_scalar(f"reward_hider/{comp}", total / n_hider_agents, total_episodes)
+        for comp, total in seeker_comp_sums.items():
+            writer.add_scalar(f"reward_seeker/{comp}", total / n_seeker_agents, total_episodes)
+
+        # ── Game outcome stats ──
+        # Count how many envs had hiders fully hidden at last step
+        hider_win_count = 0
+        for ei in range(n_envs):
+            base_vals = [ep_reward_breakdown[ei][n].get("base", 0.0) for n in HIDER_NAMES]
+            if base_vals and np.mean(base_vals) > 0:
+                hider_win_count += 1
+        hider_win_rate = hider_win_count / n_envs
+        writer.add_scalar("game/hider_win_rate", hider_win_rate, total_episodes)
+        writer.add_scalar("game/seeker_win_rate", 1.0 - hider_win_rate, total_episodes)
 
         if hider_stats:
             writer.add_scalar("loss/hider_policy", hider_stats["policy_loss"], total_episodes)

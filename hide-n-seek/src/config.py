@@ -22,17 +22,17 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (2, 2),       # fixed 2 boxes
         "n_ramps_range": (0, 0),       # no ramps
         "allowed_layouts": ["divider", "cross"],  # simple layouts only
-        "horizon": 200,                # shorter episodes
+        "horizon": 200,                # OpenAI paper: 240 → user-adjusted 200
         "prep_fraction": 0.4,
         # Smaller networks learn faster with limited data
         "attn_embed_dim": 64,
         "attn_n_heads": 2,
         "attn_n_layers": 1,
         "hidden_dim": 128,
-        # Higher entropy for exploration
-        "entropy_coef_start": 0.03,
-        "entropy_coef_end": 0.01,
-        "suggested_episodes": 5_000,
+        # Higher entropy for exploration in early phase
+        "entropy_coef_start": 0.02,
+        "entropy_coef_end": 0.005,
+        "suggested_episodes": 500_000,
     },
     2: {
         "description": "2v2, complex arenas, 2-3 boxes, 0-1 ramps — learn tool use",
@@ -41,15 +41,15 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (2, 3),
         "n_ramps_range": (0, 1),
         "allowed_layouts": ["divider", "cross", "L_shape"],
-        "horizon": 240,
+        "horizon": 200,
         "prep_fraction": 0.4,
         "attn_embed_dim": 64,
         "attn_n_heads": 2,
         "attn_n_layers": 1,
         "hidden_dim": 128,
-        "entropy_coef_start": 0.02,
-        "entropy_coef_end": 0.008,
-        "suggested_episodes": 10_000,
+        "entropy_coef_start": 0.01,
+        "entropy_coef_end": 0.003,
+        "suggested_episodes": 1_000_000,
     },
     3: {
         "description": "2v2, full complexity — coordinated team strategies",
@@ -58,16 +58,16 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (3, 5),
         "n_ramps_range": (0, 2),
         "allowed_layouts": ["divider", "cross", "L_shape", "rooms"],
-        "horizon": 240,
-        "prep_fraction": 0.4,
+        "horizon": 250,
+        "prep_fraction": 0.25,
         # Same network arch as Phase 1 & 2 so weights transfer
-        "attn_embed_dim": 64,
-        "attn_n_heads": 2,
-        "attn_n_layers": 1,
+        "attn_embed_dim": 128,
+        "attn_n_heads": 4,
+        "attn_n_layers": 2,
         "hidden_dim": 128,
-        "entropy_coef_start": 0.02,
-        "entropy_coef_end": 0.005,
-        "suggested_episodes": 20_000,
+        "entropy_coef_start": 0.01,
+        "entropy_coef_end": 0.002,
+        "suggested_episodes": 2_000_000,
     },
 }
 
@@ -92,8 +92,8 @@ ENV_CONFIG = {
     "n_ramps": 1,
 
     # Episode
-    "horizon": 240,               # total episode steps
-    "prep_fraction": 0.4,         # 40% preparation phase (seekers frozen)
+    "horizon": 250,               # total episode steps (OpenAI: 240)
+    "prep_fraction": 0.25,         # 25% preparation phase (seekers frozen)
     "n_substeps": 15,             # MuJoCo substeps per action
 
     # Observations
@@ -109,17 +109,17 @@ ENV_CONFIG = {
     # Reward shaping — DOUBLED prep-phase bonuses for single-machine training
     "shape_prep_movement": 0.01,       # hider bonus per unit speed during prep  (was 0.005)
     "shape_grab_and_move": 0.02,       # bonus for grabbing + moving an object   (was 0.01)
-    "shape_hider_near_cover": 0.04,    # hider bonus during prep if wall ≤ 2m    (was 0.02)
+    "shape_hider_near_cover": 0.02,    # hider bonus during prep if wall ≤ 2m    (was 0.02)
     "shape_prep_near_object": 0.02,    # hider bonus during prep if near box/ramp(was 0.01)
     "shape_box_toward_wall": 0.03,     # NEW: hider bonus for pushing box closer to a wall
-    "shape_hider_dist_from_seeker": 0.05,  # hider play bonus: flee from seekers
+    "shape_hider_dist_from_seeker": 0.025,  # hider play bonus: flee from seekers
     "shape_hider_occluded": 0.03,      # hider play bonus per blocked seeker LOS
     "shape_hider_seen_proximity": 0.05,# hider play penalty when seen (scaled by closeness)
     "shape_hider_move_when_seen": 0.02,# hider play bonus for moving while visible
     "shape_hider_rotate_object": 0.01,  # hider bonus for rotating grabbed objects
     "shape_hider_rotate_when_seen": 0.03, # boosted rotation reward when seen (blockade building)
-    "shape_hider_perpendicular": 0.03,   # hider bonus for moving perpendicular to seeker LOS when seen
-    "shape_hider_flee_boost": 0.04,      # hider bonus for increasing distance from seeker when seen
+    "shape_hider_perpendicular": 0.015,   # hider bonus for moving perpendicular to seeker LOS when seen
+    "shape_hider_flee_boost": 0.02,      # hider bonus for increasing distance from seeker when seen
     "shape_seeker_dist_to_hider": 0.05,# seeker play bonus: chase hiders
     "shape_seeker_coverage": 0.03,     # seeker bonus per new 2m×2m cell visited
     "shape_seeker_team_coverage": 0.02,# extra bonus when cell is new for whole team
@@ -138,12 +138,12 @@ ENV_CONFIG = {
 # ─────────────────────── MAPPO Training ───────────────────────
 
 MAPPO_CONFIG = {
-    # PPO core — tuned for sample efficiency on single machine
-    "gamma": 0.995,               # longer effective horizon (was 0.99)
+    # PPO core — aligned with OpenAI "Emergent Tool Use" paper
+    "gamma": 0.998,               # OpenAI paper discount factor
     "gae_lambda": 0.95,
     "clip_epsilon": 0.2,
-    "entropy_coef": 0.02,         # start value — decayed during training (was 0.01)
-    "entropy_coef_end": 0.005,    # final entropy coef after linear decay
+    "entropy_coef": 0.01,         # OpenAI paper: 0.01 decaying
+    "entropy_coef_end": 0.002,    # final entropy coef after linear decay
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
 
@@ -163,12 +163,15 @@ MAPPO_CONFIG = {
     "attn_n_heads": 4,
     "attn_n_layers": 2,
 
-    # Training — tuned for higher sample reuse
-    "n_rollout_steps": 240,       # steps per rollout (= 1 episode)
-    "ppo_epochs": 15,             # more gradient steps per rollout (was 10)
-    "mini_batch_size": 128,       # smaller batches → more updates (was 256)
-    "n_total_steps": 50_000_000,  # total environment steps
-    "n_envs": 16,                  # fewer envs → higher reuse rate (was 32)
+    # Training — aligned with OpenAI paper (scaled for single machine)
+    "n_rollout_steps": 200,       # steps per rollout (= 1 episode = horizon)
+    "ppo_epochs": 2,              # PPO epochs per update (OpenAI: 1, but we accumulate rounds)
+    "mini_batch_size": 800,       # 4 episodes per mini-batch (horizon × n_accum_rounds)
+    "n_accum_rounds": 4,          # accumulate 4 rounds before PPO update
+                                   # effective batch = n_envs × horizon × 4 = 102,400
+                                   # (OpenAI: 480 × 240 = 115,200)
+    "n_total_steps": 700_000_000, # ~700M steps across all curriculum phases
+    "n_envs": 128,                # 128 parallel envs (batch ≈ 25,600 steps/round)
 
     # Value normalizer warmup
     "value_norm_warmup_rounds": 50,  # skip normalisation for first 50 rounds
@@ -177,8 +180,8 @@ MAPPO_CONFIG = {
     "share_policy_within_team": True,
 
     # Logging
-    "log_interval": 10,           # rounds between log prints
-    "save_interval": 500,         # episodes between checkpoints
+    "log_interval": 50,           # rounds between log prints
+    "save_interval": 50_000,      # episodes between checkpoints (~390 rounds)
     "eval_interval": 100,
     "eval_episodes": 10,
     "log_dir": "runs",
