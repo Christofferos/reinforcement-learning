@@ -22,15 +22,15 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (2, 2),       # fixed 2 boxes
         "n_ramps_range": (0, 0),       # no ramps
         "allowed_layouts": ["divider", "cross"],  # simple layouts only
-        "horizon": 200,                # OpenAI paper: 240 → user-adjusted 200
-        "prep_fraction": 0.4,
-        # Smaller networks learn faster with limited data
-        "attn_embed_dim": 64,
-        "attn_n_heads": 2,
-        "attn_n_layers": 1,
-        "hidden_dim": 128,
+        "horizon": 240,                # OpenAI paper: 240
+        "prep_fraction": 0.4,          # OpenAI paper: ~40% prep
+        # Same network arch across all phases so weights transfer
+        "attn_embed_dim": 128,
+        "attn_n_heads": 4,
+        "attn_n_layers": 2,
+        "hidden_dim": 256,
         # Higher entropy for exploration in early phase
-        "entropy_coef_start": 0.02,
+        "entropy_coef_start": 0.01,
         "entropy_coef_end": 0.005,
         "suggested_episodes": 500_000,
     },
@@ -41,12 +41,12 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (2, 3),
         "n_ramps_range": (0, 1),
         "allowed_layouts": ["divider", "cross", "L_shape"],
-        "horizon": 200,
+        "horizon": 240,
         "prep_fraction": 0.4,
-        "attn_embed_dim": 64,
-        "attn_n_heads": 2,
-        "attn_n_layers": 1,
-        "hidden_dim": 128,
+        "attn_embed_dim": 128,
+        "attn_n_heads": 4,
+        "attn_n_layers": 2,
+        "hidden_dim": 256,
         "entropy_coef_start": 0.01,
         "entropy_coef_end": 0.003,
         "suggested_episodes": 1_000_000,
@@ -58,15 +58,14 @@ CURRICULUM_PHASES = {
         "n_boxes_range": (3, 5),
         "n_ramps_range": (0, 2),
         "allowed_layouts": ["divider", "cross", "L_shape", "rooms"],
-        "horizon": 250,
-        "prep_fraction": 0.25,
-        # Same network arch as Phase 1 & 2 so weights transfer
+        "horizon": 240,                # OpenAI paper: 240
+        "prep_fraction": 0.4,          # OpenAI paper: ~40% prep
         "attn_embed_dim": 128,
         "attn_n_heads": 4,
         "attn_n_layers": 2,
-        "hidden_dim": 128,
+        "hidden_dim": 256,
         "entropy_coef_start": 0.01,
-        "entropy_coef_end": 0.002,
+        "entropy_coef_end": 0.0,       # OpenAI: anneal to 0
         "suggested_episodes": 2_000_000,
     },
 }
@@ -92,8 +91,8 @@ ENV_CONFIG = {
     "n_ramps": 1,
 
     # Episode
-    "horizon": 250,               # total episode steps (OpenAI: 240)
-    "prep_fraction": 0.25,         # 25% preparation phase (seekers frozen)
+    "horizon": 240,               # OpenAI paper: 240
+    "prep_fraction": 0.4,         # OpenAI paper: ~40% preparation phase (seekers frozen)
     "n_substeps": 15,             # MuJoCo substeps per action
 
     # Observations
@@ -106,25 +105,11 @@ ENV_CONFIG = {
     "reward_type": "joint_zero_sum",   # 'selfish', 'joint_mean', 'joint_zero_sum'
     "reward_scale": 1.0,
 
-    # Reward shaping — DOUBLED prep-phase bonuses for single-machine training
-    "shape_prep_movement": 0.01,       # hider bonus per unit speed during prep  (was 0.005)
-    "shape_grab_and_move": 0.02,       # bonus for grabbing + moving an object   (was 0.01)
-    "shape_hider_near_cover": 0.02,    # hider bonus during prep if wall ≤ 2m    (was 0.02)
-    "shape_prep_near_object": 0.02,    # hider bonus during prep if near box/ramp(was 0.01)
-    "shape_box_toward_wall": 0.03,     # NEW: hider bonus for pushing box closer to a wall
-    "shape_hider_dist_from_seeker": 0.025,  # hider play bonus: flee from seekers
-    "shape_hider_occluded": 0.03,      # hider play bonus per blocked seeker LOS
-    "shape_hider_seen_proximity": 0.05,# hider play penalty when seen (scaled by closeness)
-    "shape_hider_move_when_seen": 0.02,# hider play bonus for moving while visible
-    "shape_hider_rotate_object": 0.01,  # hider bonus for rotating grabbed objects
-    "shape_hider_rotate_when_seen": 0.03, # boosted rotation reward when seen (blockade building)
-    "shape_hider_perpendicular": 0.015,   # hider bonus for moving perpendicular to seeker LOS when seen
-    "shape_hider_flee_boost": 0.02,      # hider bonus for increasing distance from seeker when seen
-    "shape_seeker_dist_to_hider": 0.05,# seeker play bonus: chase hiders
-    "shape_seeker_coverage": 0.03,     # seeker bonus per new 2m×2m cell visited
-    "shape_seeker_team_coverage": 0.02,# extra bonus when cell is new for whole team
-    "shape_seeker_center_post_prep": 0.03, # seeker bonus for approaching center after prep
-    "shape_individual_blend": 0.4,     # fraction of per-agent reward blended in (was 0.25)
+    # Reward shaping — light bonuses, base ±1 game reward dominates
+    # (Actual values are hardcoded in env.py — these are for reference only)
+    # Play-phase shaping is OFF to allow emergent strategy discovery.
+    # Only prep-phase object interaction and seeker exploration are lightly shaped.
+    "shape_individual_blend": 0.3,     # 30% individual / 70% team (OpenAI-style)
 
     # Level design
     "perimeter_gap": 1.5,                # gap between interior walls and outer walls for escape routes
@@ -143,14 +128,14 @@ MAPPO_CONFIG = {
     "gae_lambda": 0.95,
     "clip_epsilon": 0.2,
     "entropy_coef": 0.01,         # OpenAI paper: 0.01 decaying
-    "entropy_coef_end": 0.002,    # final entropy coef after linear decay
+    "entropy_coef_end": 0.0,      # OpenAI: anneal to zero
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
 
-    # Learning rates — slightly lower for stability with fewer envs
-    "lr_actor": 3e-4,             # (was 5e-4)
-    "lr_critic": 3e-4,            # (was 5e-4)
-    "lr_end_factor": 0.1,         # LR anneals to 10% of initial (was 0.0)
+    # Learning rates — OpenAI paper: ~1e-4
+    "lr_actor": 1e-4,
+    "lr_critic": 1e-4,
+    "lr_end_factor": 0.0,         # OpenAI: anneal LR to zero
 
     # Network (MLP critic) — defaults for Phase 3
     "hidden_dim": 256,
@@ -163,15 +148,15 @@ MAPPO_CONFIG = {
     "attn_n_heads": 4,
     "attn_n_layers": 2,
 
-    # Training — aligned with OpenAI paper (scaled for single machine)
-    "n_rollout_steps": 200,       # steps per rollout (= 1 episode = horizon)
-    "ppo_epochs": 2,              # PPO epochs per update (OpenAI: 1, but we accumulate rounds)
-    "mini_batch_size": 800,       # 4 episodes per mini-batch (horizon × n_accum_rounds)
+    # Training — aligned with OpenAI paper
+    "n_rollout_steps": 240,       # steps per rollout (= 1 episode = horizon)
+    "ppo_epochs": 1,              # OpenAI paper: 1 epoch per rollout
+    "mini_batch_size": 960,       # 4 episodes per mini-batch (240 × 4)
     "n_accum_rounds": 4,          # accumulate 4 rounds before PPO update
-                                   # effective batch = n_envs × horizon × 4 = 102,400
+                                   # effective batch = 128 × 240 × 4 = 122,880
                                    # (OpenAI: 480 × 240 = 115,200)
     "n_total_steps": 700_000_000, # ~700M steps across all curriculum phases
-    "n_envs": 128,                # 128 parallel envs (batch ≈ 25,600 steps/round)
+    "n_envs": 128,                # 128 parallel envs (batch ≈ 30,720 steps/round)
 
     # Value normalizer warmup
     "value_norm_warmup_rounds": 50,  # skip normalisation for first 50 rounds
