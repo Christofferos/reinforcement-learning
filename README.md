@@ -53,8 +53,11 @@ Make sure parameters are the same in training as in evaluation. I used a field c
 Training locomotion requires practice with randomization. Such as: challinging agent balance during gait by pushing it with small forces, adding rubble and uneven ground, adding waypoints with varying speed targets and orientations. Agent eventually gains confident and balanced gait with enough practice in uncertain but steadily challenging environments. Once good gait and balance is achieved, increase difficulty to introduce other locomotion patterns. Those needed for e.g. parkour / advanced locomotion tracks.
 
 ## Procedural parkour tracks
-Varying difficulty
-<img width="538" height="627" alt="Easy" src="https://github.com/user-attachments/assets/b8b175a2-fb57-40d9-bd2a-111afa9d0ec7" />
-<img width="539" height="627" alt="Medium" src="https://github.com/user-attachments/assets/61d7bb4c-d46b-4f24-adea-7a332ad1180a" />
-<img width="540" height="629" alt="Hard" src="https://github.com/user-attachments/assets/d398fc06-cd36-4995-b2b3-95614aaa8e20" />
+<table>
+  <tr>
+    <td><img width="538" height="627" alt="Easy" src="https://github.com/user-attachments/assets/b8b175a2-fb57-40d9-bd2a-111afa9d0ec7" /></td>
+<td><img width="539" height="627" alt="Medium" src="https://github.com/user-attachments/assets/61d7bb4c-d46b-4f24-adea-7a332ad1180a" /></td>
+<td><img width="540" height="629" alt="Hard" src="https://github.com/user-attachments/assets/d398fc06-cd36-4995-b2b3-95614aaa8e20" /></td>
+  </tr>
+</table>
 
