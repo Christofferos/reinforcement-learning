@@ -7,11 +7,10 @@
 </table>
 
 Here are some of the projects I have done. Have a look:
+
 1. https://www.youtube.com/watch?v=_F91ktb_wxU
 2. https://www.youtube.com/watch?v=CYF2pNHuyC8
 3. https://www.youtube.com/shorts/LoGcZkZzLSA
-
-
 
 # Reinforcement Learning 🗺️
 
@@ -25,7 +24,6 @@ I share my mistakes and what I have learnt from them listed here: `mistakes_lear
 
 1. `python3 -m venv .venv` standing at `./gymnasium`
 2. Activate a python virtual environment:
-
    - Mac: `source .venv/bin/activate`
    - Windows: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` then `.\.venv\Scripts\Activate.ps1`
 
@@ -50,3 +48,6 @@ Re-train on previously trained models instead of starting from scratch every tim
 
 #4.
 Make sure parameters are the same in training as in evaluation. I used a field called `frame_skip` to smooth out rendering in evaluation. Took me 2 weeks until releasing it heavily affects the model´s ability to function properly.
+
+#5.
+Training locomotion requires practice with randomization. Such as: challinging agent balance during gait by pushing it with small forces, adding rubble and uneven ground, adding waypoints with varying speed targets and orientations. Agent eventually gains confident and balanced gait with enough practice in uncertain but steadily challenging environments. Once good gait and balance is achieved, increase difficulty to introduce other locomotion patterns. Those needed for e.g. parkour / advanced locomotion tracks.

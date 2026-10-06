@@ -35,7 +35,7 @@ def flat_cfg() -> ParkourEnvCfg:
             resample_every_n_resets=1,
         ),
         episode_length_s=40.0,
-        command_speed_range=(0.5, 1.25),
+        command_speed_range=(1.25, 2.25),
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
         reward=RewardCfg(
             progress=2.0, progress_per_second=False, clip_progress=1.5,
