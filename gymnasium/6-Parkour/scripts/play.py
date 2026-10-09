@@ -4,15 +4,22 @@ The viewer opens as a borderless full-screen window by default; pass --windowed 
 
 Examples::
 
-    python scripts/play.py Parkour-Procedural-Play-v0            # random actions
-    python scripts/play.py Parkour-Procedural-v0 --checkpoint models/<run>/final.zip
-    python scripts/play.py Parkour-Rough-v0 --episodes 3 --viewer none
-    python scripts/play.py Parkour-Rough-v0 --windowed
+    python scripts/play.py Flat                 # random actions
+    python scripts/play.py Rough                # random actions
+    python scripts/play.py Procedural           # random actions
+
+    python scripts/play.py Procedural --checkpoint models/<run>/final.zip
+    python scripts/play.py Procedural --checkpoint models/<run>/final.zip --difficulty 0.3
+
+Playback uses one fixed terrain difficulty with the curriculum off: ``--difficulty`` if given,
+otherwise the mean level saved with the checkpoint (``.state.json``), otherwise the task's
+starting difficulty.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -36,6 +43,46 @@ def load_policy(checkpoint: str, algo: str):
     except ImportError:
         pass
     return algos[algo].load(checkpoint)
+
+
+def load_obs_normalizer(checkpoint: str):
+    """Return ``obs -> normalised obs`` using the ``.vecnormalize.pkl`` saved with a checkpoint."""
+    path = Path(checkpoint)
+    stats = path.with_name(path.stem + ".vecnormalize.pkl")
+    if not stats.exists():
+        return lambda obs: obs
+    import pickle
+
+    with stats.open("rb") as handle:
+        normalizer = pickle.load(handle)
+    normalizer.training = False
+    print(f"using observation normalisation from {stats}")
+    return normalizer.normalize_obs
+
+
+def saved_difficulty(checkpoint, step: float) -> float | None:
+    """Mean worker difficulty saved with ``checkpoint``, snapped to the curriculum grid."""
+    path = Path(checkpoint).with_suffix(".state.json")
+    if not path.exists():
+        return None
+    level = float(np.mean(json.loads(path.read_text())["difficulties"]))
+    return round(round(level / step) * step, 6) if step > 0 else level
+
+
+def configure_difficulty(cfg, requested: float | None, checkpoint: str | None) -> str:
+    """Fix ``cfg``'s terrain difficulty for playback, turn the curriculum off, and name the source."""
+    terrain = cfg.terrain
+    saved = saved_difficulty(checkpoint, terrain.difficulty_step) if checkpoint and requested is None else None
+    if requested is not None:
+        level, source = requested, "--difficulty"
+    elif saved is not None:
+        level, source = saved, f"saved with {Path(checkpoint).name}"
+    else:
+        level, source = terrain.difficulty, "task default"
+    low, high = terrain.difficulty_range
+    terrain.difficulty = float(np.clip(level, low, high))
+    terrain.curriculum = False
+    return source
 
 
 def make_fullscreen(env) -> bool:
@@ -70,26 +117,30 @@ def make_fullscreen(env) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("task", nargs="?", default="Procedural")
-    parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--algo", default="PPO")
-    parser.add_argument("--episodes", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--viewer", choices=["human", "none"], default="human")
     parser.add_argument("--camera", default="side_view", help="e.g. side_view, chase_view, egocentric")
-    parser.add_argument("--windowed", action="store_true", help="open the viewer in a window instead of fullscreen")
-    parser.add_argument("--overhead-observation", action=argparse.BooleanOptionalAction, default=True,
-                        help="feed the three upward-ray distances to the policy (default); use --no-overhead-observation to only visualize them with older checkpoints")
+    parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--speed", type=float, default=0.5,
                         help="playback speed as a fraction of real time (default 0.5); 1.0 runs as fast as the sim allows")
-    parser.add_argument("--until-fall", action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument("--until-fall", action=argparse.BooleanOptionalAction, default=False,
                         help="remove the time limit and stall termination so episodes only end on a fall, going out of bounds, or reaching the goal (default; use --no-until-fall to restore the task's limits)")
-    parser.add_argument("--soft-termination", action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument("--soft-termination", action=argparse.BooleanOptionalAction, default=False,
                         help="relax the fall thresholds (deeper crouch, more tilt, deeper pits, wider bounds) so stumbles get a chance to recover (default; use --no-soft-termination for the task's strict limits)")
+    parser.add_argument("--windowed", action="store_true", help="open the viewer in a window instead of fullscreen")
+    parser.add_argument("task", nargs="?", default="Procedural")
+    parser.add_argument("--algo", default="PPO")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--viewer", choices=["human", "none"], default="human")
+    parser.add_argument("--difficulty", type=float, default=None,
+                        help="fixed terrain difficulty in [0, 1]; by default the level saved with --checkpoint, "
+                             "else the task's starting difficulty")
     args = parser.parse_args()
+    if args.difficulty is not None and not 0.0 <= args.difficulty <= 1.0:
+        parser.error("difficulty must be in [0, 1]")
 
     cfg = tasks.TASKS[args.task]()
-    cfg.observation.overhead_scan_observation = args.overhead_observation
+    source = configure_difficulty(cfg, args.difficulty, args.checkpoint)
+    print(f"difficulty {cfg.terrain.difficulty:.2f} from {source}; curriculum off for playback")
     env = gym.make(
         args.task,
         cfg=cfg,
@@ -97,6 +148,7 @@ def main() -> None:
         camera_name=args.camera,
     )
     policy = load_policy(args.checkpoint, args.algo) if args.checkpoint else None
+    normalize = load_obs_normalizer(args.checkpoint) if args.checkpoint else (lambda obs: obs)
 
     if args.until_fall:
         base = env.unwrapped
@@ -130,7 +182,7 @@ def main() -> None:
             if policy is None:
                 action = np.zeros(env.action_space.shape)
             else:
-                action, _ = policy.predict(obs, deterministic=True)
+                action, _ = policy.predict(normalize(obs), deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             if args.viewer == "human":
                 # Pace playback to args.speed * real time (1 step = dt of sim time).

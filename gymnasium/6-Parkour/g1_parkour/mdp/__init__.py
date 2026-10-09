@@ -1,6 +1,6 @@
 """MDP building blocks: observations, rewards, terminations and events."""
 
-from .events import EventCfg, push, randomize_model
+from .events import EventCfg, push, randomize_model, schedule_push
 from .observations import (
     ObservationCfg,
     height_scan,
@@ -24,6 +24,7 @@ __all__ = [
     "push",
     "quat_to_mat",
     "randomize_model",
+    "schedule_push",
     "terms",
     "yaw_from_quat",
 ]

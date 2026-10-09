@@ -30,6 +30,12 @@ SHARED_ASSETS = """
     <texture name="PlatformTex" type="2d" builtin="checker" rgb1="0.15 0.2 0.5" rgb2="0.15 0.2 0.5" width="300" height="300" mark="edge" markrgb="1 1 1"/>
     <material name="PlatformMat" texture="PlatformTex" texrepeat="1 1" texuniform="true" specular="0.1" shininess="0.1"/>
     <material name="geom" rgba="0.8 0.6 .4 1"/>
+    <!-- Friction-tinted rubble appearances, assigned per geom at reset by
+         mdp.events.randomize_rubble_sections. rgba stays neutral white so geom_rgba carries
+         the ice/mud colour; these materials only add the glossy vs matte shading.
+         MatIce gets a little emission so the pale colour survives the scene lighting. -->
+    <material name="MatIce" rgba="1 1 1 1" emission="0.2" specular="0.9" shininess="0.9" reflectance="0.4"/>
+    <material name="MatMud" rgba="1 1 1 1" specular="0.0" shininess="0.02" reflectance="0"/>
 """
 
 

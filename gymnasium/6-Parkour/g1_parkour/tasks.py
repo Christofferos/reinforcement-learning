@@ -25,27 +25,59 @@ ENTRY_POINT = "g1_parkour.env:ParkourEnv"
 # Base configs
 # --------------------------------------------------------------------------------------
 
+# Reward weights shared by every stage. One reward scale from Flat to Procedural keeps the
+# VecNormalize return statistics and the value function restored by --resume valid when a
+# run moves to the next stage, and keeps the gait terms worth as much there as on Flat.
+LOCOMOTION_REWARDS = dict(
+    progress=1.0, progress_per_second=True, clip_progress=4.0,
+    waypoint_bonus=20.0, goal_bonus=200.0, fall_penalty=-30.0,
+    # Per stride from the step terms: the flat_0.0.9 gallop (one foot leads 0.56 m, the other
+    # catches up 0.19 m behind it) nets -13.2, the flat_0.0.10 skip (0.30 m lead, -0.02 m
+    # catch-up) -1.7, an even 0.3 m walk +10 and an even 0.15 m shuffle +5. The 0.3 m margin
+    # keeps paying for longer steps, which faster commands need.
+    feet_air_time=2.0, feet_step_ahead=5.0, feet_step_ahead_margin=0.3,
+    feet_step_symmetry=-10.0, feet_slide=-0.1,
+    # Facing the waypoint: walking 33 deg sideways at 0.58 m/s costs ~0.17 per step.
+    heading=0.3, lateral_velocity=-0.2,
+)
+
 # Keeps the height scan (flat => constant)
 def flat_cfg() -> ParkourEnvCfg:
     return ParkourEnvCfg(
         terrain=TerrainCfg(
             kind="flat",
             difficulty=0.0,
-            params={"course_length": 12.0, "waypoint_spacing": 3.0, "lateral_jitter": 1.25},
+            params={
+                "course_length": 12.0, "waypoint_spacing": 3.0, "lateral_jitter": 1.25,
+                "course_length_growth": 6.0, "lateral_jitter_growth": 1.25,
+            },
             resample_every_n_resets=1,
+            curriculum=True,
+            difficulty_range=(0.0, 1.0),
         ),
         episode_length_s=40.0,
-        command_speed_range=(1.25, 2.25),
+        command_speed_range=(0.5, 1.5),
+        command_speed_difficulty_shift=1.0,
+        zero_command_prob=0.0,
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
         reward=RewardCfg(
-            progress=2.0, progress_per_second=False, clip_progress=1.5,
-            velocity_tracking=1.5, waypoint_bonus=5.0, goal_bonus=20.0,
-            alive=0.05, upright=0.3, heading=0.1, base_height=0.5,
+            # Per-step budget at a good 1 m/s walk: progress ~1, tracking ~1, gait ~0.5,
+            # posture ~0.8, so no single term dominates the return.
+            **LOCOMOTION_REWARDS,
+            velocity_tracking=1.0, velocity_tracking_sigma=0.5, base_height=0.5,
+            alive=0.15, upright=0.1,
             ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
-            lateral_velocity=-0.05, overspeed=-0.5, fall_penalty=-30.0,
         ),
-        termination=TerminationCfg(recovery_grace_steps=10, stall_steps=500, stall_distance=0.15),
-        events=EventCfg(reset_noise_scale=0.01, reset_yaw_range=0.25),
+        termination=TerminationCfg(
+            bad_height_scale=0.75, recovery_grace_steps=20,
+            stall_steps=500, stall_distance=0.15,
+        ),
+        events=EventCfg(
+            reset_noise_scale=0.01, reset_yaw_range=0.25,
+            # 0.12-0.25 m/s kicks at difficulty 0, ramping to 0.3-0.6 m/s (Procedural's level) at 1.
+            push_robot=True, push_interval_steps=200, push_velocity=0.25,
+            push_velocity_difficulty_shift=0.35,
+        ),
         debug_scan_markers=True,
     )
 
@@ -54,19 +86,35 @@ def rough_cfg() -> ParkourEnvCfg:
     cfg = ParkourEnvCfg(
         terrain=TerrainCfg(
             kind="rough",
-            difficulty=0.5,
-            params={"course_length": 28.0, "course_width": 12.0},
+            difficulty=0.0,
+            # 16 m at difficulty 0 to 25 m at 1; difficulty also raises hills, deepens pits,
+            # shortens bumps and adds rubble along the route (see make_rough).
+            params={"course_length": 16.0, "course_length_growth": 9.0, "course_width": 12.0},
             resample_every_n_resets=5,
             curriculum=True,
+            difficulty_range=(0.0, 1.0),
         ),
-        episode_length_s=70.0,
-        command_speed_range=(0.75, 2.0),
+        episode_length_s=60.0,
+        command_speed_range=(0.5, 1.25),
+        command_speed_difficulty_shift=1.0,
+        zero_command_prob=0.0,
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
         reward=RewardCfg(
-            progress_per_second=False, clip_progress=1.5,
-            velocity_tracking=1.5, overspeed=-0.5,
+            **LOCOMOTION_REWARDS,
+            velocity_tracking=1.5, velocity_tracking_sigma=1, base_height=0.5,
+            alive=0.15, upright=0.1,
+            ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
         ),
-        events=EventCfg(reset_noise_scale=0.02, randomize_friction=True, randomize_mass=True),
+        termination=TerminationCfg(
+            bad_height_scale=0.75, recovery_grace_steps=20,
+            stall_steps=500, stall_distance=0.15,
+        ),
+        events=EventCfg(
+            reset_noise_scale=0.02, reset_yaw_range=0.25, 
+            randomize_friction=True, randomize_mass=True, 
+            push_robot=True, push_interval_steps=200, 
+            push_velocity=0.25, push_velocity_difficulty_shift=0.5,
+        ),
         debug_scan_markers=True,
     )
     return cfg
@@ -80,16 +128,17 @@ def parkour_cfg() -> ParkourEnvCfg:
             params={"num_modules": 8},
             resample_every_n_resets=1,
             curriculum=True,
+            difficulty_range=(0.0, 1.0),
         ),
         episode_length_s=60.0,
-        command_speed_range=(1.0, 2.75),
+        command_speed_range=(0.5, 2.0),
+        command_speed_difficulty_shift=1.0,
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
         reward=RewardCfg(
-            progress=20.0, progress_per_second=False, clip_progress=1.2,
-            waypoint_bonus=20.0, goal_bonus=200.0, alive=0.05, upright=0.1,
-            heading=0.1, overspeed=-0.2, preferred_speed=1.2, fall_penalty=-30.0,
+            **LOCOMOTION_REWARDS,
+            velocity_tracking=1.5, base_height=0.5,
+            alive=0.05, upright=0.1,
             ctrl_cost=-0.01, action_rate=-0.01, angular_velocity=-0.01,
-            lateral_velocity=-0.05,
         ),
         termination=TerminationCfg(bad_height_scale=0.75, recovery_grace_steps=20),
         events=EventCfg(

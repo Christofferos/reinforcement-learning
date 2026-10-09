@@ -36,7 +36,9 @@ class ObservationCfg:
     scan_shape: tuple[int, int] = (9, 5)
     scan_max_depth: float = 3.0
     scan_clip: tuple[float, float] = (-1.0, 1.5)
-    overhead_offsets: tuple[float, ...] = (0.0, 0.5, 1.0)
+    overhead_offsets: tuple[float, ...] = (0.0, 0.2, 0.4)
+    """Forward offsets of the upward rays. Spaced closer than the 0.24 m tunnel bar so it is
+    never between rays; 0.5 m spacing missed it while its centre was 0.13-0.38 m ahead."""
     overhead_origin_height: float = 0.5
     overhead_max_depth: float = 2.0
 
@@ -121,7 +123,13 @@ def overhead_scan(
     yaw: float,
     cfg: ObservationCfg,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Cast upwards from a low, yaw-aligned line; cap misses at the maximum range."""
+    """Cast upwards from a low, yaw-aligned line; cap misses at the maximum range.
+
+    A ray that starts inside a terrain box (a hurdle, climb or stair taller than
+    ``overhead_origin_height`` ahead) counts as a miss: ``mj_ray`` reports that box's top face
+    from the inside, which is something to step onto, not duck under. Heightfields are not
+    checked.
+    """
     offsets = np.asarray(cfg.overhead_offsets)
     direction = np.array([0.0, 0.0, 1.0])
     geom_id = np.zeros(1, dtype=np.int32)
@@ -133,8 +141,18 @@ def overhead_scan(
         distance = mujoco.mj_ray(
             model, data, start, direction, TERRAIN_RAY_MASK, 1, -1, geom_id,
         )
+        if distance >= 0 and _inside_box(model, data, int(geom_id[0]), start):
+            distance = -1.0
         if distance < 0 or distance > cfg.overhead_max_depth:
             distance = cfg.overhead_max_depth
         depths[index] = distance
         hits[index] = start + direction * distance
     return depths, hits
+
+
+def _inside_box(model, data, geom: int, point: np.ndarray) -> bool:
+    """Whether ``point`` lies inside ``geom`` when it is a box, rotated boxes included."""
+    if model.geom_type[geom] != mujoco.mjtGeom.mjGEOM_BOX:
+        return False
+    local = data.geom_xmat[geom].reshape(3, 3).T @ (point - data.geom_xpos[geom])
+    return bool(np.all(np.abs(local) <= model.geom_size[geom]))

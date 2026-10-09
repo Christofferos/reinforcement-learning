@@ -9,14 +9,14 @@ import numpy as np
 
 @dataclass
 class RewardCfg:
-    progress: float = 2.0
+    progress: float = 20.0
     """Potential-based shaping: distance closed toward the active waypoint, per second."""
     progress_per_second: bool = True
     """False rewards metres travelled instead of progress rate on every control step."""
-    preferred_speed: float = 1.2
-    overspeed: float = 0.0
     velocity_tracking: float = 0.0
+    """Maximum reward for matching the waypoint's commanded planar velocity."""
     velocity_tracking_sigma: float = 0.35
+    """Velocity-error tolerance in m/s for the exponential tracking reward."""
     waypoint_bonus: float = 10.0
     goal_bonus: float = 50.0
     heading: float = 0.3
@@ -24,6 +24,8 @@ class RewardCfg:
     alive: float = 0.5
     upright: float = 0.5
     base_height: float = 0.0
+    base_height_clearance_margin: float = 0.05
+    """Safety gap above the robot when lowering its posture target for overhead clearance."""
     lateral_velocity: float = -0.1
     angular_velocity: float = -0.02
     action_rate: float = -0.05
@@ -33,6 +35,30 @@ class RewardCfg:
     fall_penalty: float = -10.0
     clip_progress: float = 3.0
     """Upper bound on the raw progress rate (m/s) before weighting."""
+    feet_air_time: float = 0.0
+    """Biped single-stance reward: the shorter of the two feet's current swing/stance
+    durations while exactly one foot is on the ground, capped at ``feet_air_time_threshold``.
+    Only paid when a non-zero speed is commanded."""
+    feet_air_time_threshold: float = 0.4
+    feet_step_ahead: float = 0.0
+    """Touchdown reward for alternating steps: paid when a foot lands and the other foot was
+    the last to land, scaled by how far ahead it lands relative to the stance foot along the
+    direction to the active waypoint, saturating at ``feet_step_ahead_margin`` and negative
+    when it lands behind. A skip (same foot always leading) nets zero per stride whichever way
+    the torso faces; a repeated hop on one foot earns nothing. Only paid when a non-zero speed
+    is commanded."""
+    feet_step_ahead_margin: float = 0.15
+    feet_step_symmetry: float = 0.0
+    """Penalty per metre of difference between consecutive left and right step lengths (along
+    the direction to the waypoint), paid at each alternating touchdown. A gallop or limp, where
+    one foot lands far ahead and the other only catches up, pays on every step; an even walk or
+    run pays almost nothing. Unlike ``feet_step_ahead`` it never saturates, so it keeps a
+    gradient toward even steps. Only paid when a non-zero speed is commanded."""
+    feet_slide: float = 0.0
+    """Penalty on the planar speed of feet that are in contact with the ground."""
+    gate_on_support: bool = True
+    """Pay ``progress`` and ``velocity_tracking`` only while the base is in a healthy pose
+    (height and tilt inside the termination band), so a slow fall earns nothing."""
 
 
 def terms(
@@ -52,18 +78,28 @@ def terms(
     waypoints_reached: int,
     reached_goal: bool,
     fell: bool,
-    forward_speed: float = 0.0,
     target_speed: float | None = None,
     velocity_error_squared: float = 0.0,
+    feet_air_time: float = 0.0,
+    feet_step_ahead: float = 0.0,
+    feet_step_asymmetry: float = 0.0,
+    feet_slide_speed: float = 0.0,
+    supported: bool = True,
 ) -> dict[str, float]:
-    progress_rate = float(np.clip(progress / dt, -cfg.clip_progress, cfg.clip_progress))
-    speed_limit = cfg.preferred_speed if target_speed is None else target_speed
+    progress_limit = cfg.clip_progress if target_speed is None else min(cfg.clip_progress, target_speed)
+    progress_rate = float(np.clip(progress / dt, -progress_limit, progress_limit))
+    gate = 1.0 if (supported or not cfg.gate_on_support) else 0.0
+    moving = target_speed is None or target_speed > 0.1
     out = {
-        "progress": cfg.progress * progress_rate * (1.0 if cfg.progress_per_second else dt),
-        "overspeed": cfg.overspeed * max(0.0, abs(forward_speed) - speed_limit) ** 2,
-        "velocity_tracking": cfg.velocity_tracking * float(
+        "progress": gate * cfg.progress * progress_rate * (1.0 if cfg.progress_per_second else dt),
+        "velocity_tracking": gate * cfg.velocity_tracking * float(
             np.exp(-velocity_error_squared / cfg.velocity_tracking_sigma**2)
-        ),
+        ) if target_speed is not None else 0.0,
+        "feet_air_time": cfg.feet_air_time * min(feet_air_time, cfg.feet_air_time_threshold)
+        if moving else 0.0,
+        "feet_step_ahead": cfg.feet_step_ahead * feet_step_ahead if moving else 0.0,
+        "feet_step_symmetry": cfg.feet_step_symmetry * feet_step_asymmetry if moving else 0.0,
+        "feet_slide": cfg.feet_slide * feet_slide_speed,
         "waypoint_bonus": cfg.waypoint_bonus * waypoints_reached,
         "goal_bonus": cfg.goal_bonus * float(reached_goal),
         "heading": cfg.heading * heading_alignment,

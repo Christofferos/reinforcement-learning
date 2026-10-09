@@ -23,8 +23,11 @@ class TerrainCfg:
     difficulty_range: tuple[float, float] = (0.1, 1.0)
     promote_completion: float = 1.0
     """Completion required for a successful full-course curriculum episode."""
-    curriculum_window: int = 20
+    curriculum_window: int = 15
     promote_success_rate: float = 0.8
+    """Promote when at least this fraction of the window are full successes; demote when at
+    least this fraction end with completion <= ``demote_completion``. Both decisions need a
+    full window, which is cleared on every level change."""
     demote_completion: float = 0.25
     difficulty_step: float = 0.05
 
@@ -44,6 +47,16 @@ class ParkourEnvCfg:
     waypoint_lookahead: int = 2
     command_speed_range: tuple[float, float] | None = None
     """Sample a requested walking speed per waypoint; None keeps legacy rewards/observations."""
+    command_speed_difficulty_shift: float = 0.0
+    """Shift both speed bounds by this amount at maximum terrain difficulty."""
+    zero_command_prob: float = 0.0
+    """Fraction of episodes whose waypoint speeds are all zero (stand-and-balance practice)."""
+    control_mode: str = "position"
+    """``position``: actions are joint-position targets around the robot's standing pose,
+    tracked by a per-substep PD loop and clipped to the motor torque limits.
+    ``torque``: actions map directly to the actuator control range (legacy)."""
+    position_action_scale: float = 1.0
+    """Radians of joint-target offset per unit action in ``position`` mode."""
     nominal_base_height: float = 1.25
     debug_scan_markers: bool = False
 

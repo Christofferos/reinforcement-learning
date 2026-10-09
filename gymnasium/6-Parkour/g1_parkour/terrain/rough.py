@@ -51,37 +51,50 @@ def make_rough(
     course_width: float = 12.0,
     resolution: float = 0.08,
     max_elevation: float = 0.35,
-    base_wavelength: float = 2.5,
+    base_wavelength: float = 3.0,
     octaves: int = 3,
     discrete_obstacles: int = 0,
     flat_start_radius: float = 1.5,
+    course_length_growth: float = 0.0,
+    base_wavelength_growth: float = -1.5,
+    rubble_per_metre: float = 0.5,
+    rubble_corridor: float = 1.0,
 ) -> TerrainSpec:
-    """Noisy heightfield course.
+    """Noisy heightfield course with rubble blocks along the route.
 
-    ``difficulty`` in [0, 1] scales the elevation range and the number of discrete
-    obstacle blocks that are scattered on top of the noise.  ``base_wavelength`` is the
-    coarsest noise feature size in metres; each extra octave halves it.
+    ``difficulty`` in [0, 1] raises the hills and deepens the pits (the noise is centred on
+    the spawn height, so it goes both above and below it), shortens the noise features so
+    bumps come more often, and scatters more and taller rubble blocks within
+    ``rubble_corridor`` metres of the route, up to ``rubble_per_metre`` at difficulty 1.
+    ``base_wavelength`` is the coarsest noise feature size in metres at difficulty 0 and
+    changes by ``base_wavelength_growth`` at difficulty 1; each extra octave halves it.
+    The course grows by ``course_length_growth`` metres at difficulty 1.
+    ``discrete_obstacles`` fixes the block count instead.
     """
     difficulty = float(np.clip(difficulty, 0.0, 1.0))
+    course_length += course_length_growth * difficulty
+    wavelength = base_wavelength + base_wavelength_growth * difficulty
     radius_x, radius_y = course_length / 2.0 + 2.0, course_width / 2.0
     ncol = int(2 * radius_x / resolution)
     nrow = int(2 * radius_y / resolution)
     base_cells = (
-        max(2, int(round(2 * radius_y / base_wavelength))),
-        max(2, int(round(2 * radius_x / base_wavelength))),
+        max(2, int(round(2 * radius_y / wavelength))),
+        max(2, int(round(2 * radius_x / wavelength))),
     )
     data = fractal_field(rng, (nrow, ncol), octaves=octaves, base_cells=base_cells)
 
     elevation = max_elevation * (0.25 + 0.75 * difficulty)
     center_x = course_length / 2.0
 
-    # Flatten a disc around the spawn so the robot never starts inside a bump.
+    # Blend a disc around the spawn to the field's mid level, which sits at z = 0, so the
+    # robot never starts inside a bump and the rest of the course has hills and pits.
     xs = np.linspace(center_x - radius_x, center_x + radius_x, ncol)
     ys = np.linspace(-radius_y, radius_y, nrow)
     gx, gy = np.meshgrid(xs, ys)
     dist = np.hypot(gx - 0.0, gy - 0.0)
     blend = np.clip((dist - flat_start_radius) / max(flat_start_radius, 1e-3), 0.0, 1.0)
-    data = data * blend
+    data = 0.5 + (data - 0.5) * blend
+    ground = (data - 0.5) * elevation
 
     hfield = HeightField(
         name="rough_terrain",
@@ -89,29 +102,35 @@ def make_rough(
         radius_x=radius_x,
         radius_y=radius_y,
         elevation=elevation,
-        pos=(center_x, 0.0, 0.0),
+        pos=(center_x, 0.0, -0.5 * elevation),
     )
-
-    boxes: list[Box] = []
-    count = discrete_obstacles if discrete_obstacles else int(round(12 * difficulty))
-    for i in range(count):
-        x = rng.uniform(3.0, course_length)
-        y = rng.uniform(-course_width / 2 + 1.0, course_width / 2 - 1.0)
-        height = rng.uniform(0.05, 0.05 + 0.25 * difficulty)
-        boxes.append(
-            Box.from_full_size(
-                f"rough_block_{i}",
-                (x, y, height / 2.0),
-                (rng.uniform(0.4, 1.2), rng.uniform(0.4, 1.2), height),
-                rgba=(0.45, 0.45, 0.5, 1.0),
-                material=None,
-            )
-        )
 
     num_wp = max(2, int(course_length / 2.5))
     xs_wp = np.linspace(2.5, course_length, num_wp)
     ys_wp = rng.uniform(-1.0, 1.0, size=num_wp) * difficulty
     waypoints = np.stack([xs_wp, ys_wp, np.zeros(num_wp)], axis=1)
+    route_x, route_y = np.concatenate([[0.0], xs_wp]), np.concatenate([[0.0], ys_wp])
+
+    boxes: list[Box] = []
+    count = discrete_obstacles or int(round(rubble_per_metre * difficulty * (course_length - 3.0)))
+    for i in range(count):
+        x = rng.uniform(3.0, course_length)
+        y = np.interp(x, route_x, route_y) + rng.uniform(-rubble_corridor, rubble_corridor)
+        half = rng.uniform(0.15, 0.4, size=2)
+        height = rng.uniform(0.05, 0.05 + 0.25 * difficulty)
+        # Rest the block on the ground under it and stand ``height`` above its highest point,
+        # so a hill never buries it.
+        under = ground[np.abs(ys - y) <= half[1]][:, np.abs(xs - x) <= half[0]]
+        bottom, top = float(under.min()) - 0.05, float(under.max()) + height
+        boxes.append(
+            Box.from_full_size(
+                f"rough_block_{i}",
+                (x, y, (bottom + top) / 2.0),
+                (2.0 * half[0], 2.0 * half[1], top - bottom),
+                rgba=(0.45, 0.45, 0.5, 1.0),
+                material=None,
+            )
+        )
 
     return TerrainSpec(
         name="rough",

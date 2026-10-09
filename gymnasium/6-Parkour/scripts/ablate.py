@@ -38,8 +38,9 @@ def ablation_task_id(name: str) -> str:
     return f"Parkour-Ablation-{slug}-v0"
 
 
-def rollout(task_id: str, policy, episodes: int, seed: int) -> dict[str, float] | None:
+def rollout(task_id: str, policy, episodes: int, seed: int, normalize=None) -> dict[str, float] | None:
     env = gym.make(task_id)
+    normalize = normalize or (lambda obs: obs)
     if policy is not None and policy.observation_space.shape != env.observation_space.shape:
         # Observation-space ablations change the obs size, so a checkpoint only
         # transfers to envs that keep the same terms it was trained with.
@@ -57,7 +58,7 @@ def rollout(task_id: str, policy, episodes: int, seed: int) -> dict[str, float] 
             if policy is None:
                 action = env.action_space.sample()
             else:
-                action, _ = policy.predict(obs, deterministic=True)
+                action, _ = policy.predict(normalize(obs), deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             total += reward
             steps += 1
@@ -88,17 +89,20 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 def cmd_eval(args) -> None:
     policy = None
+    normalize = None
     if args.checkpoint:
         from stable_baselines3 import PPO
+        from play import load_obs_normalizer
 
         policy = PPO.load(args.checkpoint)
+        normalize = load_obs_normalizer(args.checkpoint)
 
     names = args.ablations or list(tasks.ABLATIONS)
     rows = []
     for name in ["baseline", *names]:
         task_id = "Parkour-Procedural-v0" if name == "baseline" else ablation_task_id(name)
         print(f"{name:24s}")
-        metrics = rollout(task_id, policy, args.episodes, args.seed)
+        metrics = rollout(task_id, policy, args.episodes, args.seed, normalize)
         if metrics is None:
             continue
         rows.append({"ablation": name, "task": task_id, **metrics})

@@ -52,7 +52,24 @@ Make sure parameters are the same in training as in evaluation. I used a field c
 #5.
 Training locomotion requires practice with randomization. Such as: challinging agent balance during gait by pushing it with small forces, adding rubble and uneven ground, adding waypoints with varying speed targets and orientations. Agent eventually gains confident and balanced gait with enough practice in uncertain but steadily challenging environments. Once good gait and balance is achieved, increase difficulty to introduce other locomotion patterns. Those needed for e.g. parkour / advanced locomotion tracks.
 
+#6.
+Hyperparameter: **ent-coef** controls how much algorithm PPO values keeping its actions random, alongside improving task reward.
+
+- Conceptually, PPO optimizes:
+
+**policy objective = reward-based improvement + ent-coef × entropy**
+
+For a continuous-action policy, entropy increases when its action distribution becomes wider.
+
+I accidentally increased ent-coef from 0 to 0.05 with the goal in mind to let the agent be more creative. But this caused trouble:
+
+- The entropy bonus encouraged increasing action standard deviation.
+- Larger deviations produced increasingly extreme sampled actions.
+- Those actions were clipped to the allowed limits, so the robot received frequent near-maximum commands.
+- It fell before gathering useful walking experience, undermining further learning.
+
 ## Procedural parkour tracks
+
 <table>
   <tr>
     <td><img width="538" height="627" alt="Easy" src="https://github.com/user-attachments/assets/b8b175a2-fb57-40d9-bd2a-111afa9d0ec7" /></td>
@@ -60,4 +77,3 @@ Training locomotion requires practice with randomization. Such as: challinging a
 <td><img width="540" height="629" alt="Hard" src="https://github.com/user-attachments/assets/d398fc06-cd36-4995-b2b3-95614aaa8e20" /></td>
   </tr>
 </table>
-

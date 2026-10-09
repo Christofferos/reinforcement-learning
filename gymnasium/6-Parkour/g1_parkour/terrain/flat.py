@@ -13,8 +13,13 @@ def make_flat(
     course_length: float = 20.0,
     waypoint_spacing: float = 2.5,
     lateral_jitter: float = 0.0,
+    course_length_growth: float = 0.0,
+    lateral_jitter_growth: float = 0.0,
 ) -> TerrainSpec:
     """Flat plane with waypoints every ``waypoint_spacing`` metres along +x."""
+    difficulty = float(np.clip(difficulty, 0.0, 1.0))
+    course_length += course_length_growth * difficulty
+    lateral_jitter += lateral_jitter_growth * difficulty
     num = max(2, int(course_length / waypoint_spacing))
     xs = np.linspace(waypoint_spacing, course_length, num)
     ys = rng.uniform(-lateral_jitter, lateral_jitter, size=num) if lateral_jitter else np.zeros(num)

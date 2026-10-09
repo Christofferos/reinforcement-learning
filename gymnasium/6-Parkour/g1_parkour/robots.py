@@ -2,7 +2,10 @@
 
 The default robot is the same textured humanoid used in ``5-HumanoidParkour/parkour.xml``
 (same body tree, joint ranges, tendons, actuators and materials), so policies and
-visuals stay comparable between the two projects.
+visuals stay comparable between the two projects. Two joint values are changed to make it
+exactly left/right symmetric, which the mirror maps in :mod:`g1_parkour.symmetry` rely on:
+the right ``hip_y`` armature is 0.01 like the left (0.008 there), and the left knee has no
+spring, like the right (stiffness 1 there).
 
 A Unitree G1 spec is also provided.  It is only usable when the MuJoCo Menagerie
 ``unitree_g1`` model is available locally (see :func:`g1_model_dir`).
@@ -10,6 +13,7 @@ A Unitree G1 spec is also provided.  It is only usable when the MuJoCo Menagerie
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,10 +39,17 @@ class RobotSpec:
     action_scale: float = 0.4
     includes: tuple[str, ...] = field(default_factory=tuple)
     """Extra MJCF files to ``<include>`` (used by the Menagerie-based G1 spec)."""
+    default_joint_pos: dict[str, float] = field(default_factory=dict)
+    """Standing pose in radians by joint name; unlisted hinge joints use the model's qpos0.
+    Used as the reset pose and as the zero-action target in position-control mode."""
+    pd_stiffness_per_torque: float = 2.0
+    """Position-control kp per actuator = this factor x the actuator's torque limit (Nm/rad)."""
+    pd_damping_ratio: float = 0.05
+    """Position-control kd = this ratio x kp (Nm s/rad)."""
 
 
 # --------------------------------------------------------------------------------------
-# Textured humanoid (identical to 5-HumanoidParkour/parkour.xml)
+# Textured humanoid (5-HumanoidParkour/parkour.xml, made exactly left/right symmetric)
 # --------------------------------------------------------------------------------------
 
 _HUMANOID_ASSETS = f"""
@@ -72,7 +83,7 @@ _HUMANOID_BODY = """
                 <body name="right_thigh" pos="0 -0.1 -0.04">
                     <joint armature="0.01" axis="1 0 0" damping="5" name="right_hip_x" pos="0 0 0" range="-25 5" stiffness="10" type="hinge"/>
                     <joint armature="0.01" axis="0 0 1" damping="5" name="right_hip_z" pos="0 0 0" range="-60 35" stiffness="10" type="hinge"/>
-                    <joint armature="0.0080" axis="0 1 0" damping="5" name="right_hip_y" pos="0 0 0" range="-110 20" stiffness="20" type="hinge"/>
+                    <joint armature="0.01" axis="0 1 0" damping="5" name="right_hip_y" pos="0 0 0" range="-110 20" stiffness="20" type="hinge"/>
                     <geom fromto="0 0 0 0 0.01 -.34" name="right_thigh1" size="0.06" type="capsule" material="material_skin"/>
                     <body name="right_shin" pos="0 0.01 -0.403">
                         <joint armature="0.0060" axis="0 -1 0" name="right_knee" pos="0 0 .02" range="-160 -2" type="hinge"/>
@@ -88,7 +99,7 @@ _HUMANOID_BODY = """
                     <joint armature="0.01" axis="0 1 0" damping="5" name="left_hip_y" pos="0 0 0" range="-110 20" stiffness="20" type="hinge"/>
                     <geom fromto="0 0 0 0 -0.01 -.34" name="left_thigh1" size="0.06" type="capsule" material="material_skin"/>
                     <body name="left_shin" pos="0 -0.01 -0.403">
-                        <joint armature="0.0060" axis="0 -1 0" name="left_knee" pos="0 0 .02" range="-160 -2" stiffness="1" type="hinge"/>
+                        <joint armature="0.0060" axis="0 -1 0" name="left_knee" pos="0 0 .02" range="-160 -2" type="hinge"/>
                         <geom fromto="0 0 0 0 0 -.3" name="left_shin1" size="0.049" type="capsule" material="material_skin"/>
                         <body name="left_foot" pos="0 0 -0.45">
                             <geom name="left_foot" type="sphere" size="0.075" pos="0 0 0.1" user="0" material="material_skin"/>
@@ -168,8 +179,14 @@ HUMANOID = RobotSpec(
     default_xml=_HUMANOID_DEFAULT,
     root_body="torso",
     spawn_height=1.4,
-    healthy_height_range=(0.8, 2.2),
+    healthy_height_range=(0.95, 2.2),
     foot_bodies=("left_foot", "right_foot"),
+    # Flexed hips/knees chosen so the whole-body CoM sits over the feet (the model has no
+    # ankles, so balance must come from the hips); also keeps qpos inside the knee range.
+    default_joint_pos={
+        "right_hip_y": math.radians(-18.5), "left_hip_y": math.radians(-18.5),
+        "right_knee": math.radians(-30.0), "left_knee": math.radians(-30.0),
+    },
 )
 
 

@@ -11,7 +11,7 @@ import mujoco
 import numpy as np
 from gymnasium.spaces import Box
 
-from . import mdp
+from . import mdp, symmetry
 from .env_cfg import ParkourEnvCfg, TerrainCfg
 from .robots import get_robot
 from .scene import build_scene_xml, default_build_dir
@@ -52,6 +52,14 @@ class ParkourEnv(gym.Env):
             low, high = self.cfg.command_speed_range
             if not np.all(np.isfinite([low, high])) or low <= 0 or high < low:
                 raise ValueError("command_speed_range must contain finite positive speeds in ascending order")
+        if not np.isfinite(self.cfg.command_speed_difficulty_shift) or self.cfg.command_speed_difficulty_shift < 0:
+            raise ValueError("command_speed_difficulty_shift must be finite and non-negative")
+        if not 0.0 <= self.cfg.zero_command_prob <= 1.0:
+            raise ValueError("zero_command_prob must be in [0, 1]")
+        if self.cfg.control_mode not in ("position", "torque"):
+            raise ValueError("control_mode must be 'position' or 'torque'")
+        if not np.isfinite(self.cfg.position_action_scale) or self.cfg.position_action_scale <= 0:
+            raise ValueError("position_action_scale must be finite and positive")
         self.render_mode = render_mode
         self._render_width = width
         self._render_height = height
@@ -64,6 +72,7 @@ class ParkourEnv(gym.Env):
 
         self._difficulty = float(self.cfg.terrain.difficulty)
         self._curriculum_successes = deque(maxlen=self.cfg.terrain.curriculum_window)
+        self._curriculum_early_failures = deque(maxlen=self.cfg.terrain.curriculum_window)
         self._reset_count = 0
         self._mujoco_renderer = None
         self._viewer_camera_set = False
@@ -126,8 +135,21 @@ class ParkourEnv(gym.Env):
         ]
         if any(body_id < 0 for body_id in self._foot_body_ids):
             raise RuntimeError("robot foot bodies not found in the scene")
+        self._foot_geom_ids = [
+            {g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] == body_id}
+            for body_id in self._foot_body_ids
+        ]
         self._ctrl_range = self.model.actuator_ctrlrange.copy()
         self._joint_range = self.model.jnt_range.copy()
+        # Actuated hinge joints: qpos/qvel addresses, target limits and PD gains per actuator.
+        act_joints = self.model.actuator_trnid[:, 0]
+        self._act_qpos_adr = self.model.jnt_qposadr[act_joints]
+        self._act_dof_adr = self.model.jnt_dofadr[act_joints]
+        self._act_limited = self.model.jnt_limited[act_joints].astype(bool)
+        self._act_joint_range = self.model.jnt_range[act_joints].copy()
+        torque_limit = np.max(np.abs(self._ctrl_range), axis=1) * np.abs(self._nominal["actuator_gear"][:, 0])
+        self._pd_kp = self.robot.pd_stiffness_per_torque * torque_limit
+        self._pd_kd = self.robot.pd_damping_ratio * self._pd_kp
         self._hinge_qpos_adr = np.array(
             [
                 self.model.jnt_qposadr[j]
@@ -160,10 +182,19 @@ class ParkourEnv(gym.Env):
         ]
 
         self._init_qpos = self.model.qpos0.copy()
+        for name, angle in self.robot.default_joint_pos.items():
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint_id < 0:
+                raise RuntimeError(f"default_joint_pos joint '{name}' not found in the scene")
+            self._init_qpos[self.model.jnt_qposadr[joint_id]] = angle
+        self._default_act_pos = self._init_qpos[self._act_qpos_adr].copy()
         self._init_qvel = np.zeros(self.model.nv)
         self._waypoints = self._resolve_waypoints(self.terrain.waypoints)
-        self._waypoint_speeds = np.full(len(self._waypoints), self.cfg.reward.preferred_speed)
+        self._waypoint_speeds = np.zeros(len(self._waypoints))
         self._velocity_error_sum = 0.0
+        self._episode_speed_sum = 0.0
+        self._episode_height_sum = 0.0
+        self._episode_height_samples = 0
         self._min_course_z = float(self._waypoints[:, 2].min()) if len(self._waypoints) else 0.0
 
         self._prev_action = np.zeros(self.model.nu)
@@ -176,6 +207,15 @@ class ParkourEnv(gym.Env):
         self._bad_height_steps = 0
         self._bad_orientation_steps = 0
         self._best_distance = float("inf")
+        self._feet_air_time = np.zeros(len(self._foot_body_ids))
+        self._feet_contact_time = np.zeros(len(self._foot_body_ids))
+        self._feet_in_contact = np.zeros(len(self._foot_body_ids), dtype=bool)
+        self._last_touchdown_foot = -1
+        self._last_step_length = np.full(len(self._foot_body_ids), np.nan)
+        self._next_push_step = -1
+        self._pending_push = np.zeros(2)
+        self._last_push: tuple[int, np.ndarray] | None = None
+        self._zero_command = False
         self._action_buffer = deque(
             [np.zeros(self.model.nu)] * max(1, self.cfg.events.action_delay_steps + 1),
             maxlen=max(1, self.cfg.events.action_delay_steps + 1),
@@ -213,14 +253,12 @@ class ParkourEnv(gym.Env):
         resample = self.cfg.terrain.resample_every_n_resets
         if (self._reset_count == 0 and seed is not None) or (
             self._reset_count > 0 and resample and self._reset_count % resample == 0
-        ) or (
-            self.cfg.terrain.curriculum and self.terrain.difficulty != self._difficulty
-        ):
-            if self.cfg.terrain.kind == "flat":
+        ) or self.terrain.difficulty != self._difficulty:
+            if self.cfg.terrain.kind == "flat" and self.terrain.difficulty == self._difficulty:
                 self.terrain = build_terrain("flat", rng, difficulty=self._difficulty,
                                              **self.cfg.terrain.params)
                 self._waypoints = self._resolve_waypoints(self.terrain.waypoints)
-                self._waypoint_speeds = np.full(len(self._waypoints), self.cfg.reward.preferred_speed)
+                self._waypoint_speeds = np.zeros(len(self._waypoints))
                 self._min_course_z = float(self._waypoints[:, 2].min())
             else:
                 self._build_world(rng)
@@ -248,12 +286,22 @@ class ParkourEnv(gym.Env):
         self.data.qpos[:] = qpos
         self.data.qvel[:] = qvel
         mujoco.mj_forward(self.model, self.data)
+        self._settle_feet_on_ground()
 
         self._target_index = start_index
         self._start_target_index = start_index
+        self._zero_command = False
         if self.cfg.command_speed_range is not None:
-            self._waypoint_speeds = rng.uniform(*self.cfg.command_speed_range, size=len(self._waypoints))
+            shift = self.cfg.command_speed_difficulty_shift * float(np.clip(self.terrain.difficulty, 0.0, 1.0))
+            low, high = self.cfg.command_speed_range
+            self._waypoint_speeds = rng.uniform(low + shift, high + shift, size=len(self._waypoints))
+            if self.cfg.zero_command_prob and rng.random() < self.cfg.zero_command_prob:
+                self._waypoint_speeds[:] = 0.0
+                self._zero_command = True
         self._velocity_error_sum = 0.0
+        self._episode_speed_sum = 0.0
+        self._episode_height_sum = 0.0
+        self._episode_height_samples = 0
         self._goal_reached = False
         self._step_count = 0
         self._waypoints_reached = 0
@@ -268,34 +316,130 @@ class ParkourEnv(gym.Env):
         self._stall_counter = 0
         self._bad_height_steps = 0
         self._bad_orientation_steps = 0
+        self._feet_air_time[:] = 0.0
+        self._feet_contact_time[:] = 0.0
+        self._feet_in_contact[:] = False
+        self._last_touchdown_foot = -1
+        self._last_step_length[:] = np.nan
+        self._last_push = None
+        if self.cfg.events.push_robot:
+            self._next_push_step, self._pending_push = mdp.schedule_push(
+                rng, self.cfg.events, 0, self.terrain.difficulty,
+            )
         self._episode_terms = {}
 
         obs = self._compute_observation()
         return obs, self._info(reward_terms={})
+
+    def _settle_feet_on_ground(self) -> None:
+        """Drop/raise the root so the lowest foot rests just above the terrain under it."""
+        clearance = []
+        for geom_ids in self._foot_geom_ids:
+            for geom_id in geom_ids:
+                bottom = float(self.data.geom_xpos[geom_id, 2] - self.model.geom_rbound[geom_id])
+                surface = self._terrain_height_below(self.data.geom_xpos[geom_id, :2], bottom + 2.0)
+                if np.isfinite(surface):
+                    clearance.append(bottom - surface)
+        if clearance:
+            self.data.qpos[2] -= min(clearance) - 0.01
+            mujoco.mj_forward(self.model, self.data)
+
+    def _apply_action(self, applied: np.ndarray) -> None:
+        """Advance physics by one control step under the configured actuation mode."""
+        low, high = self._ctrl_range[:, 0], self._ctrl_range[:, 1]
+        if self.cfg.control_mode == "torque":
+            self.data.ctrl[:] = low + (applied + 1.0) * 0.5 * (high - low)
+            mujoco.mj_step(self.model, self.data, nstep=self.cfg.frame_skip)
+            return
+        target = self._default_act_pos + self.cfg.position_action_scale * applied
+        target = np.where(
+            self._act_limited,
+            np.clip(target, self._act_joint_range[:, 0], self._act_joint_range[:, 1]),
+            target,
+        )
+        gear = self.model.actuator_gear[:, 0]
+        for _ in range(self.cfg.frame_skip):
+            q = self.data.qpos[self._act_qpos_adr]
+            qd = self.data.qvel[self._act_dof_adr]
+            torque = self._pd_kp * (target - q) - self._pd_kd * qd
+            self.data.ctrl[:] = np.clip(torque / gear, low, high)
+            mujoco.mj_step(self.model, self.data, nstep=1)
+
+    def _foot_contacts(self) -> np.ndarray:
+        """Per-foot flag for contact with anything other than the robot itself."""
+        contacts = np.zeros(len(self._foot_geom_ids), dtype=bool)
+        for contact in self.data.contact[: self.data.ncon]:
+            for index, geom_ids in enumerate(self._foot_geom_ids):
+                if contact.geom1 in geom_ids and contact.geom2 not in geom_ids:
+                    contacts[index] = True
+                elif contact.geom2 in geom_ids and contact.geom1 not in geom_ids:
+                    contacts[index] = True
+        return contacts
+
+    def _update_gait_state(self, travel_direction: np.ndarray | None = None) -> tuple[float, float, float, float]:
+        """Advance per-foot swing/stance clocks; return (single-stance mode time, step-ahead, slide speed,
+        step asymmetry).
+
+        Steps are measured along ``travel_direction`` (unit vector toward the active waypoint), or the
+        torso heading when none is given. Measuring on the torso heading let a gallop turn its body
+        so the trailing foot's catch-up step projects to roughly zero instead of landing behind.
+        """
+        in_contact = self._foot_contacts()
+        touchdown = np.flatnonzero(in_contact & ~self._feet_in_contact)
+        self._feet_in_contact = in_contact
+        self._feet_contact_time = np.where(in_contact, self._feet_contact_time + self.dt, 0.0)
+        self._feet_air_time = np.where(in_contact, 0.0, self._feet_air_time + self.dt)
+        mode_time = np.where(in_contact, self._feet_contact_time, self._feet_air_time)
+        single_stance = int(in_contact.sum()) == 1
+        air_time_reward = float(np.min(mode_time)) if single_stance else 0.0
+        step_ahead = 0.0
+        step_asymmetry = 0.0
+        if len(touchdown) == 1 and len(self._foot_body_ids) == 2:
+            foot = int(touchdown[0])
+            if self._last_touchdown_foot not in (-1, foot):
+                direction = mdp.quat_to_mat(self.root_quat)[:2, 0] if travel_direction is None else travel_direction
+                offset = self.data.xpos[self._foot_body_ids[foot], :2] - self.data.xpos[self._foot_body_ids[1 - foot], :2]
+                step = float(direction @ offset)
+                step_ahead = float(np.clip(step / self.cfg.reward.feet_step_ahead_margin, -1.0, 1.0))
+                if np.isfinite(self._last_step_length[1 - foot]):
+                    step_asymmetry = abs(step - self._last_step_length[1 - foot])
+                self._last_step_length[foot] = step
+            self._last_touchdown_foot = foot
+        slide = 0.0
+        velocity = np.zeros(6)
+        for index, body_id in enumerate(self._foot_body_ids):
+            if in_contact[index]:
+                mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, body_id, velocity, 0)
+                slide += float(np.linalg.norm(velocity[3:5]))
+        return air_time_reward, step_ahead, slide, step_asymmetry
 
     def step(self, action: np.ndarray):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         self._action_buffer.append(action)
         applied = self._action_buffer[0]
 
-        low, high = self._ctrl_range[:, 0], self._ctrl_range[:, 1]
-        self.data.ctrl[:] = low + (applied + 1.0) * 0.5 * (high - low)
-
-        if self.cfg.events.push_robot and self._step_count and (
-            self._step_count % self.cfg.events.push_interval_steps == 0
-        ):
-            mdp.push(self.data, self.np_random, self.cfg.events)
+        if self.cfg.events.push_robot and self._step_count == self._next_push_step:
+            mdp.push(self.data, self._pending_push)
+            self._last_push = (self._step_count, self._pending_push.copy())
+            self._next_push_step, self._pending_push = mdp.schedule_push(
+                self.np_random, self.cfg.events, self._step_count, self.terrain.difficulty,
+            )
 
         active_target = self._target().copy()
+        active_speed = self.command_speed
+        command_origin = self.root_pos.copy()
         distance_before = self._distance_to_target()
-        mujoco.mj_step(self.model, self.data, nstep=self.cfg.frame_skip)
+        self._apply_action(applied)
         self._step_count += 1
 
         distance_after = float(np.linalg.norm(active_target[:2] - self.root_pos[:2]))
         progress = distance_before - distance_after
         reached = self._advance_waypoint()
 
-        reward, reward_terms, terminated, reason = self._evaluate(action, progress, reached)
+        reward, reward_terms, terminated, reason = self._evaluate(
+            action, progress, reached, active_target=active_target, target_speed=active_speed,
+            command_origin=command_origin,
+        )
         truncated = self._step_count >= self.max_episode_steps
         obs = self._compute_observation()
 
@@ -336,12 +480,9 @@ class ParkourEnv(gym.Env):
                 radius = 0.22 if active else 0.14
                 label = ""
                 if active:
-                    speed = (
-                        self._waypoint_speeds[index]
-                        if self.cfg.command_speed_range is not None
-                        else self.cfg.reward.preferred_speed
-                    )
-                    label = f"WP {index + 1} (target) | {speed:.2f} m/s"
+                    label = f"WP {index + 1} (target)"
+                    if self.cfg.command_speed_range is not None:
+                        label += f" | {self._waypoint_speeds[index]:.2f} m/s"
                 viewer.add_marker(
                     type=mujoco.mjtGeom.mjGEOM_SPHERE,
                     pos=waypoint + np.array([0.0, 0.0, 0.3]),
@@ -358,6 +499,8 @@ class ParkourEnv(gym.Env):
                 emission=0.0,
                 label=f"Speed: {np.linalg.norm(self.data.qvel[:2]):.2f} m/s",
             )
+            for marker in self._push_markers():
+                viewer.add_marker(**marker)
         frame = self._mujoco_renderer.render(self.render_mode)
         if self.render_mode == "human" and not self._viewer_camera_set:
             # Gymnasium's window viewer ignores camera_name for human rendering (it always
@@ -374,6 +517,47 @@ class ParkourEnv(gym.Env):
             self._viewer_camera_set = True
         return frame
 
+    PUSH_PREVIEW_STEPS = 20
+    PUSH_BALL_SPEED_GAIN = 20.0
+    """Incoming ball speed per m/s of push, so stronger pushes fly in faster."""
+    PUSH_BALL_SPAWN_DISTANCE_GAIN = 10.0
+    """Ball spawn distance beyond the impact point per m/s of push, so stronger pushes start farther out."""
+    PUSH_BALL_IMPACT_DISTANCE = 0.1
+
+    def _push_markers(self) -> list[dict]:
+        """A ball flying in before a scheduled push and an arrow showing the kick just after it."""
+        if not self.cfg.events.push_robot:
+            return []
+        markers = []
+        incoming = self._next_push_step - self._step_count
+        pending = float(np.linalg.norm(self._pending_push))
+        # Both speed and spawn distance scale with the push, so their ratio sets how long the ball is in flight.
+        flight_time = self.PUSH_BALL_SPAWN_DISTANCE_GAIN / self.PUSH_BALL_SPEED_GAIN
+        time_to_impact = incoming * self.dt
+        if 0 < incoming and time_to_impact <= flight_time + 1e-9 and pending > 1e-9:
+            direction = np.append(self._pending_push / pending, 0.0)
+            # Constant approach speed scaled by the push, arriving exactly on the push step.
+            speed = self.PUSH_BALL_SPEED_GAIN * pending
+            distance = self.PUSH_BALL_IMPACT_DISTANCE + speed * time_to_impact
+            markers.append(dict(
+                type=mujoco.mjtGeom.mjGEOM_SPHERE, pos=self.root_pos - direction * distance,
+                size=np.full(3, 0.08), rgba=(1.0, 0.3, 0.1, 0.9), emission=0.5, label="",
+            ))
+        if self._last_push is not None and self._step_count - self._last_push[0] <= self.PUSH_PREVIEW_STEPS:
+            kick = self._last_push[1]
+            magnitude = float(np.linalg.norm(kick))
+            if magnitude > 1e-9:
+                z_axis = np.append(kick / magnitude, 0.0)
+                y_axis = np.array([0.0, 0.0, 1.0])
+                x_axis = np.cross(y_axis, z_axis)
+                markers.append(dict(
+                    type=mujoco.mjtGeom.mjGEOM_ARROW, pos=self.root_pos.copy(),
+                    size=np.array([0.03, 0.03, 0.4 + magnitude]),
+                    mat=np.column_stack([x_axis, y_axis, z_axis]).ravel(),
+                    rgba=(1.0, 0.3, 0.1, 0.9), emission=0.5, label=f"Push {magnitude:.2f} m/s",
+                ))
+        return markers
+
     @staticmethod
     def _add_waypoint_marker_to_scene(viewer, marker):
         if not viewer.vopt.geomgroup[4] or viewer.scn.ngeom >= viewer.scn.maxgeom:
@@ -381,7 +565,8 @@ class ParkourEnv(gym.Env):
         geom = viewer.scn.geoms[viewer.scn.ngeom]
         mujoco.mjv_initGeom(
             geom, marker["type"], marker["size"], marker["pos"],
-            np.eye(3).ravel(), np.asarray(marker["rgba"], dtype=np.float32),
+            np.asarray(marker.get("mat", np.eye(3).ravel()), dtype=np.float64),
+            np.asarray(marker["rgba"], dtype=np.float32),
         )
         geom.category = mujoco.mjtCatBit.mjCAT_DECOR
         geom.objid = -1
@@ -444,23 +629,31 @@ class ParkourEnv(gym.Env):
         )
         return from_z - dist if dist >= 0 else -np.inf
 
-    def _evaluate(self, action, progress, reached):
+    def _evaluate(self, action, progress, reached, *, active_target=None, target_speed=None,
+                  command_origin=None):
         cfg = self.cfg
         gravity = mdp.projected_gravity(self.root_quat)
         upright = float(-gravity[2])
         rot = mdp.quat_to_mat(self.root_quat)
         lin_vel_local = rot.T @ self.data.qvel[0:3]
-        ang_vel_local = rot.T @ self.data.qvel[3:6]
+        ang_vel_local = self.data.qvel[3:6]
 
-        to_target = self._target()[:2] - self.root_pos[:2]
+        target = self._target() if active_target is None else active_target
+        speed = self.command_speed if target_speed is None else target_speed
+        origin = self.root_pos if command_origin is None else command_origin
+        to_target = target[:2] - origin[:2]
         norm = np.linalg.norm(to_target)
         heading_alignment = float(rot[:2, 0] @ (to_target / norm)) if norm > 1e-6 else 0.0
-        desired_velocity = self.command_speed * to_target / norm if norm > 1e-6 else np.zeros(2)
+        desired_velocity = speed * to_target / norm if norm > 1e-6 else np.zeros(2)
         velocity_error_squared = float(np.sum(np.square(self.data.qvel[:2] - desired_velocity)))
         self._velocity_error_sum += np.sqrt(velocity_error_squared)
 
         surface_z = self._terrain_height_below(self.root_pos[:2], self.root_pos[2] + 0.1)
         height_above_terrain = self.root_pos[2] - surface_z if np.isfinite(surface_z) else 99.0
+        self._episode_speed_sum += float(np.linalg.norm(self.data.qvel[:2]))
+        if np.isfinite(surface_z):
+            self._episode_height_sum += float(height_above_terrain)
+            self._episode_height_samples += 1
 
         if self._hinge_jnt_ids.size:
             qpos = self.data.qpos[self._hinge_qpos_adr]
@@ -478,13 +671,19 @@ class ParkourEnv(gym.Env):
         if distance < self._best_distance - cfg.termination.stall_distance:
             self._best_distance = distance
             self._stall_counter = 0
+        elif self._zero_command:
+            self._stall_counter = 0  # standing still is the task in zero-command episodes
         else:
             self._stall_counter += 1
 
         reached_goal = self._goal_reached and reached
         low_height = height_above_terrain < self.robot.healthy_height_range[0] * cfg.termination.bad_height_scale
+        tilted = upright < cfg.termination.orientation_limit
         self._bad_height_steps = self._bad_height_steps + 1 if low_height else 0
-        self._bad_orientation_steps = self._bad_orientation_steps + 1 if upright < cfg.termination.orientation_limit else 0
+        self._bad_orientation_steps = self._bad_orientation_steps + 1 if tilted else 0
+        air_time_reward, step_ahead, slide_speed, step_asymmetry = self._update_gait_state(
+            to_target / norm if norm > 1e-6 else None
+        )
         terminated, reason = mdp.check(
             cfg.termination,
             height_above_terrain=height_above_terrain,
@@ -505,7 +704,7 @@ class ParkourEnv(gym.Env):
             progress=progress,
             heading_alignment=heading_alignment,
             upright=upright,
-            height_error=height_above_terrain - cfg.nominal_base_height,
+            height_error=self._height_reward_error(surface_z),
             lateral_speed=float(lin_vel_local[1]),
             ang_vel=ang_vel_local,
             action=action,
@@ -515,15 +714,53 @@ class ParkourEnv(gym.Env):
             waypoints_reached=int(reached and not reached_goal),
             reached_goal=reached_goal,
             fell=fell,
-            forward_speed=float(lin_vel_local[0]),
-            target_speed=self.command_speed if cfg.command_speed_range is not None else None,
+            target_speed=speed if cfg.command_speed_range is not None else None,
             velocity_error_squared=velocity_error_squared,
+            feet_air_time=air_time_reward,
+            feet_step_ahead=step_ahead,
+            feet_step_asymmetry=step_asymmetry,
+            feet_slide_speed=slide_speed,
+            supported=not (low_height or tilted),
         )
         self._prev_action = action.copy()
         if reached_goal:
             terminated = True
             reason = "goal"
         return float(sum(terms.values())), terms, terminated, reason
+
+    def _height_reward_error(self, surface_z: float) -> float:
+        if not self.cfg.reward.base_height or not np.isfinite(surface_z):
+            return 0.0
+        groups = self.model.geom_group
+        support_contacts = [
+            contact
+            for contact in self.data.contact
+            if contact.geom1 >= 0 and contact.geom2 >= 0
+            and {int(groups[contact.geom1]), int(groups[contact.geom2])} == {0, 1}
+            and contact.dist <= 0.0 and abs(contact.frame[2]) > 0.5
+            and contact.pos[2] < self.root_pos[2]
+        ]
+        if not support_contacts:
+            return 0.0
+        surface_z = max(float(contact.pos[2]) for contact in support_contacts)
+        height_above_terrain = self.root_pos[2] - surface_z
+        observation = self.cfg.observation
+        origin = self.root_pos.copy()
+        origin[2] = surface_z + observation.overhead_origin_height
+        depths, _ = mdp.overhead_scan(
+            self.model, self.data, origin, mdp.yaw_from_quat(self.root_quat), observation,
+        )
+        target_height = self.cfg.nominal_base_height
+        if len(depths) and np.min(depths) < observation.overhead_max_depth:
+            robot_geoms = groups == 0
+            top_above_root = float(np.max(
+                self.data.geom_xpos[robot_geoms, 2] + self.model.geom_rbound[robot_geoms]
+            ) - self.root_pos[2])
+            clearance = observation.overhead_origin_height + float(np.min(depths))
+            target_height = min(target_height, max(
+                0.0, clearance - top_above_root - self.cfg.reward.base_height_clearance_margin,
+            ))
+        return height_above_terrain - target_height
 
     def _compute_observation(self) -> np.ndarray:
         cfg = self.cfg.observation
@@ -534,7 +771,7 @@ class ParkourEnv(gym.Env):
         if cfg.base_lin_vel:
             parts.append(rot.T @ self.data.qvel[0:3] + rng.normal(0, cfg.noise_lin_vel, 3))
         if cfg.base_ang_vel:
-            parts.append(rot.T @ self.data.qvel[3:6] + rng.normal(0, cfg.noise_ang_vel, 3))
+            parts.append(self.data.qvel[3:6] + rng.normal(0, cfg.noise_ang_vel, 3))
         if cfg.projected_gravity:
             parts.append(mdp.projected_gravity(self.root_quat) + rng.normal(0, cfg.noise_gravity, 3))
         if cfg.base_height:
@@ -571,6 +808,39 @@ class ParkourEnv(gym.Env):
                 self._obs_history.append(obs)
             return np.concatenate(list(self._obs_history))
         return obs
+
+    def observation_mirror(self) -> symmetry.Mirror:
+        """Left/right mirror of :meth:`_compute_observation`, term by term in the same order."""
+        cfg = self.cfg.observation
+        joints = symmetry.hinge_mirror(self.model)
+        scalar = symmetry.Mirror.identity(1)
+        terms = [
+            (cfg.base_lin_vel, symmetry.VECTOR),
+            (cfg.base_ang_vel, symmetry.PSEUDOVECTOR),
+            (cfg.projected_gravity, symmetry.VECTOR),
+            (cfg.base_height, scalar),
+            (cfg.joint_pos, joints),
+            (cfg.joint_vel, joints),
+            (cfg.last_action, self.action_mirror()),
+        ]
+        terms += [(cfg.waypoint_command, symmetry.VECTOR)] * self.cfg.waypoint_lookahead
+        terms += [
+            (cfg.speed_command, scalar),
+            (cfg.height_scan, symmetry.lateral_mirror(cfg.scan_points)),
+            (cfg.overhead_scan and cfg.overhead_scan_observation,
+             symmetry.Mirror.identity(len(cfg.overhead_offsets))),
+        ]
+        parts = [mirror for enabled, mirror in terms if enabled] or [scalar]
+        return symmetry.Mirror.concat([symmetry.Mirror.concat(parts)] * cfg.history_length)
+
+    def action_mirror(self) -> symmetry.Mirror:
+        """Left/right mirror of the action vector (see :func:`symmetry.actuator_mirror`)."""
+        mirror = symmetry.actuator_mirror(self.model)
+        if self.cfg.control_mode == "position" and not np.allclose(
+            mirror(self._default_act_pos), self._default_act_pos
+        ):
+            raise ValueError("position control needs a mirror-symmetric default pose")
+        return mirror
 
     def _height_scan_obs(self) -> np.ndarray:
         cfg = self.cfg.observation
@@ -624,6 +894,7 @@ class ParkourEnv(gym.Env):
             "terrain_modules": self.terrain.modules,
             "termination": reason,
             "is_success": reason == "goal",
+            "zero_command": self._zero_command,
         }
         if self.cfg.command_speed_range is not None:
             info["command_speed"] = self.command_speed
@@ -631,8 +902,19 @@ class ParkourEnv(gym.Env):
         info.update({f"reward/{k}": v for k, v in reward_terms.items()})
         if reason:
             info["episode_reward_terms"] = dict(self._episode_terms)
-            self._update_curriculum(info["course_completion"], success=info["is_success"])
+            info["avg_speed"] = self._episode_speed_sum / max(self._step_count, 1)
+            if self._episode_height_samples:
+                info["avg_height"] = self._episode_height_sum / self._episode_height_samples
+            if not self._zero_command:
+                self._update_curriculum(info["course_completion"], success=info["is_success"])
         return info
+
+    def set_difficulty(self, difficulty: float) -> None:
+        """Pin the terrain difficulty; the next reset rebuilds the course if it changed."""
+        low, high = self.cfg.terrain.difficulty_range
+        self._difficulty = float(np.clip(difficulty, low, high))
+        self._curriculum_successes.clear()
+        self._curriculum_early_failures.clear()
 
     def _update_curriculum(self, completion: float, *, success: bool = False) -> None:
         cfg = self.cfg.terrain
@@ -641,15 +923,16 @@ class ParkourEnv(gym.Env):
         self._curriculum_successes.append(
             success and completion >= cfg.promote_completion and self._start_target_index == 0
         )
+        self._curriculum_early_failures.append(completion <= cfg.demote_completion)
+        if len(self._curriculum_successes) < cfg.curriculum_window:
+            return
         low, high = cfg.difficulty_range
         difficulty = self._difficulty
-        if completion <= cfg.demote_completion:
-            difficulty = max(low, self._difficulty - cfg.difficulty_step)
-        elif (
-            len(self._curriculum_successes) == cfg.curriculum_window
-            and sum(self._curriculum_successes) / cfg.curriculum_window >= cfg.promote_success_rate
-        ):
+        if sum(self._curriculum_successes) / cfg.curriculum_window >= cfg.promote_success_rate:
             difficulty = min(high, self._difficulty + cfg.difficulty_step)
+        elif sum(self._curriculum_early_failures) / cfg.curriculum_window >= cfg.promote_success_rate:
+            difficulty = max(low, self._difficulty - cfg.difficulty_step)
         if difficulty != self._difficulty:
             self._difficulty = difficulty
             self._curriculum_successes.clear()
+            self._curriculum_early_failures.clear()
