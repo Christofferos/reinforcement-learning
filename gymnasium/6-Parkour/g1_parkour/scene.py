@@ -6,7 +6,12 @@ import tempfile
 from pathlib import Path
 
 from .robots import RobotSpec
-from .terrain.core import TerrainSpec
+from .terrain.core import TERRAIN_GEOM_ATTRS, TerrainSpec
+
+SCAN_MARKER_RGBA = (1.0, 0.2, 0.2, 0.6)
+"""Ground-scan dot: red, drawn at the height the policy reads."""
+SCAN_CLIPPED_RGBA = (1.0, 0.2, 1.0, 0.9)
+"""Ground-scan dot whose reading was clipped (an off-course ray read as ``scan_clip``): magenta."""
 
 SHARED_ASSETS = """
     <texture type="skybox" builtin="gradient" rgb1=".4 .6 .8" rgb2="0 0 0" width="800" height="800"/>
@@ -52,28 +57,28 @@ def _track_and_field_xml(ground_z: float, course_length: float) -> list[str]:
     line_z = ground_z + 0.001
     geoms = [
         f'    <geom name="ground" type="plane" size="120 120 0.1" pos="0 0 {ground_z - 0.1}" '
-        'material="MatGrass" condim="3" group="1" friction="1 .1 .1"/>',
+        f'material="MatGrass" condim="3" {TERRAIN_GEOM_ATTRS} friction="1 .1 .1"/>',
     ]
     for side, y in (("left", -10.0), ("right", 10.0)):
         geoms.append(
             f'    <geom name="grass_{side}" type="box" size="{half_x:.3f} 5 0.05" '
-            f'pos="{x_mid:.3f} {y} {box_z}" material="MatGrass" condim="3" group="1" friction="1 .1 .1"/>'
+            f'pos="{x_mid:.3f} {y} {box_z}" material="MatGrass" condim="3" {TERRAIN_GEOM_ATTRS} friction="1 .1 .1"/>'
         )
     for i, y in enumerate((-4.0, -2.0, 0.0, 2.0, 4.0)):
         material = "MatTrackLight" if i % 2 == 0 else "MatTrackDark"
         geoms.append(
             f'    <geom name="lane_{i + 1}" type="box" size="{half_x:.3f} 1 0.05" '
-            f'pos="{x_mid:.3f} {y} {box_z}" material="{material}" condim="3" group="1" friction="1 .1 .1"/>'
+            f'pos="{x_mid:.3f} {y} {box_z}" material="{material}" condim="3" {TERRAIN_GEOM_ATTRS} friction="1 .1 .1"/>'
         )
     for i, y in enumerate((-3.0, -1.0, 1.0, 3.0)):
         geoms.append(
             f'    <geom name="lane_line_{i + 1}" type="box" size="{half_x:.3f} 0.05 0.001" '
-            f'pos="{x_mid:.3f} {y} {line_z}" material="MatLine" condim="3" group="1" friction="1 .1 .1"/>'
+            f'pos="{x_mid:.3f} {y} {line_z}" material="MatLine" condim="3" {TERRAIN_GEOM_ATTRS} friction="1 .1 .1"/>'
         )
     for name, x in (("start_line", 1.0), ("finish_line", course_length)):
         geoms.append(
             f'    <geom name="{name}" type="box" size="0.05 5 0.001" '
-            f'pos="{x:.3f} 0 {line_z}" material="MatLine" condim="3" group="1" friction="1 .1 .1"/>'
+            f'pos="{x:.3f} 0 {line_z}" material="MatLine" condim="3" {TERRAIN_GEOM_ATTRS} friction="1 .1 .1"/>'
         )
     return geoms
 
@@ -107,7 +112,7 @@ def build_scene_xml(
     for i in range(num_scan_markers):
         world.append(
             f'    <geom name="scan_viz_{i}" type="sphere" size="0.035" pos="0 0 -50" '
-            'rgba="1 0.2 0.2 0.6" contype="0" conaffinity="0" group="2"/>'
+            f'rgba="{" ".join(str(c) for c in SCAN_MARKER_RGBA)}" contype="0" conaffinity="0" group="2"/>'
         )
     for index in range(num_overhead_markers):
         world.append(

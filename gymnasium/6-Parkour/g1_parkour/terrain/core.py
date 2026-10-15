@@ -7,6 +7,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+TERRAIN_GEOM_ATTRS = 'group="1" priority="1"'
+"""Attributes of every terrain geom. Group 1 is what the scans ray-cast against. Priority 1 above
+the robot's 0 makes MuJoCo take a contact's friction from the terrain alone; with equal
+priorities it takes the larger of the two, and the feet's 1.0 hid every slippery ground draw,
+ice section and metal ramp below it."""
+
+
 @dataclass
 class Box:
     """An axis-aligned (optionally rotated) collision box.
@@ -22,6 +29,9 @@ class Box:
     rgba: tuple[float, float, float, float] | None = None
     friction: tuple[float, float, float] = (1.0, 0.1, 0.1)
     contype: int = 1
+    ceiling: bool = False
+    """Something to pass under, like a tunnel bar: downward ground rays continue below it, while
+    the upward overhead scan still sees it."""
 
     @classmethod
     def from_full_size(cls, name: str, pos, full_size, **kwargs) -> "Box":
@@ -31,7 +41,7 @@ class Box:
         attrs = [
             f'name="{self.name}"',
             'type="box"',
-            'group="1"',
+            TERRAIN_GEOM_ATTRS,
             'condim="3"',
             f'pos="{self.pos[0]:.4f} {self.pos[1]:.4f} {self.pos[2]:.4f}"',
             f'size="{self.size[0]:.4f} {self.size[1]:.4f} {self.size[2]:.4f}"',
@@ -75,7 +85,7 @@ class HeightField:
     def geom_xml(self) -> str:
         return (
             f'    <geom name="{self.name}_geom" type="hfield" hfield="{self.name}" '
-            f'pos="{self.pos[0]} {self.pos[1]} {self.pos[2]}" group="1" condim="3" '
+            f'pos="{self.pos[0]} {self.pos[1]} {self.pos[2]}" {TERRAIN_GEOM_ATTRS} condim="3" '
             f'friction="1 0.1 0.1" material="Concrete"/>'
         )
 

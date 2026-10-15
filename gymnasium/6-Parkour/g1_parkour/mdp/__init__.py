@@ -3,6 +3,7 @@
 from .events import EventCfg, push, randomize_model, schedule_push
 from .observations import (
     ObservationCfg,
+    ground_ray,
     height_scan,
     overhead_scan,
     projected_gravity,
@@ -18,6 +19,7 @@ __all__ = [
     "RewardCfg",
     "TerminationCfg",
     "check",
+    "ground_ray",
     "height_scan",
     "overhead_scan",
     "projected_gravity",

@@ -295,3 +295,32 @@ def test_checkpoints_load_without_the_maps(tmp_path):
         assert (resumed.symmetry, resumed.symmetry_coef, resumed.mirror) == ("loss", 2.0, maps)
     finally:
         env.close()
+
+
+@pytest.mark.parametrize("mode", ["none", "both"])
+def test_max_std_caps_a_resumed_policy_before_its_first_rollout(mode, tmp_path):
+    import torch as th
+    from g1_parkour.symmetric_ppo import SymmetricPPO
+
+    env = _flat_vec_env()
+    try:
+        maps = _maps(env) if mode != "none" else None
+        drifted = _ppo(SymmetricPPO, env, symmetry=mode, mirror=maps, policy_kwargs={"log_std_init": np.log(2.3)})
+        drifted.save(tmp_path / "drifted")
+        model = SymmetricPPO.load(tmp_path / "drifted", env=env, device="cpu", symmetry=mode, mirror=maps, max_std=0.5)
+        seen = []
+        original = model.collect_rollouts
+
+        def record(*args, **kwargs):
+            seen.append(th.exp(model.policy.log_std).max().item())
+            return original(*args, **kwargs)
+
+        model.collect_rollouts = record
+        model.ent_coef = 1.0  # a strong push up, which the cap must hold
+        model.learn(128)
+        assert seen and max(seen) <= 0.5 + 1e-6
+        assert th.exp(model.policy.log_std).max().item() <= 0.5 + 1e-6
+    finally:
+        env.close()
+    with pytest.raises(ValueError):
+        SymmetricPPO("MlpPolicy", "Pendulum-v1", max_std=0.0)

@@ -171,6 +171,40 @@ def test_height_scan_debug_markers_follow_ground_hits(cfg_factory):
         env.close()
 
 
+def test_off_course_scan_dots_sit_at_the_clipped_reading_in_magenta():
+    import mujoco
+    from g1_parkour.env import ParkourEnv
+    from g1_parkour.scene import SCAN_CLIPPED_RGBA, SCAN_MARKER_RGBA
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": ("beam",)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = 1.0  # a 0.28 m beam: the outer columns hang over the pit
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        beam = next(b for b in env.terrain.boxes if b.name.startswith("beam_") and "land" not in b.name)
+        env.data.qpos[:2] = (beam.pos[0], beam.pos[1])
+        mujoco.mj_forward(env.model, env.data)
+        reading = env._compute_observation()
+        relative = env._scan_buffer[0]  # raw depths this step
+        low = cfg.observation.scan_clip[0]
+        clipped = (cfg.nominal_base_height - relative) < low
+        assert clipped.any() and not clipped.all()
+        dots = env.data.geom_xpos[env._scan_marker_ids]
+        origin_z = env.root_pos[2] + 0.1
+        seen = np.clip(cfg.nominal_base_height - relative, *cfg.observation.scan_clip)
+        np.testing.assert_allclose(dots[:, 2], origin_z - (cfg.nominal_base_height - seen))
+        top = beam.pos[2] + beam.size[2]
+        assert np.all(dots[clipped, 2] > top - 0.6)  # 0.3 m below the nominal stance, not in the pit
+        rgba = env.model.geom_rgba[env._scan_marker_ids]
+        np.testing.assert_allclose(rgba[clipped], np.tile(SCAN_CLIPPED_RGBA, (clipped.sum(), 1)), atol=1e-6)
+        np.testing.assert_allclose(rgba[~clipped], np.tile(SCAN_MARKER_RGBA, ((~clipped).sum(), 1)), atol=1e-6)
+        assert reading.shape == env.observation_space.shape
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("task_id", list(tasks.TASKS))
 def test_task_steps(task_id):
     env = gym.make(task_id)
@@ -276,7 +310,7 @@ def test_overhead_scan_hits_tunnel_underside(difficulty, yaw):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     forward = np.array([np.cos(yaw), np.sin(yaw)])
-    clearance = 1.45 - 0.4 * difficulty
+    clearance = 1.45 - 0.25 * difficulty
     for index, offset in enumerate(cfg.overhead_offsets):
         origin = np.array([0.0, 0.0, 2.0 + cfg.overhead_origin_height])
         origin[:2] = (1.75 - offset) * forward
@@ -294,17 +328,54 @@ def test_overhead_scan_hits_tunnel_underside(difficulty, yaw):
         assert depths.min() == pytest.approx(clearance - cfg.overhead_origin_height), ahead
 
 
-@pytest.mark.parametrize("module", ["hurdle", "climb"])
-def test_overhead_scan_ignores_obstacles_taller_than_the_ray_origin(module):
+@pytest.mark.parametrize("difficulty", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("origin_z", [1.35, 1.2, 1.0])
+def test_ground_scan_passes_under_tunnel_bar_but_sees_climbs(difficulty, origin_z):
+    from dataclasses import replace
+    import mujoco
+    from g1_parkour.mdp.observations import ObservationCfg, height_scan
+    from g1_parkour.terrain.parkour import Cursor, mod_climb, mod_tunnel
+
+    cfg = ObservationCfg()
+    tunnel = mod_tunnel(np.random.default_rng(0), difficulty, Cursor())
+    climb = mod_climb(np.random.default_rng(0), difficulty, Cursor(x=10.0))
+    boxes = tunnel.boxes + climb.boxes
+    model = mujoco.MjModel.from_xml_string(
+        "<mujoco><worldbody>" + "".join(replace(b, material=None).to_xml() for b in boxes)
+        + "</worldbody></mujoco>"
+    )
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    ceilings = frozenset(model.geom(b.name).id for b in boxes if b.ceiling)
+    assert len(ceilings) == 1
+    bar = next(b for b in tunnel.boxes if b.ceiling)
+    # Standing (1.35 m), level with the bar (1.2 m) or crouched (1.0 m), from where the front ray
+    # first reaches the bar to under it: every ray reads the tunnel floor.
+    for x in np.arange(bar.pos[0] - 1.3, bar.pos[0] + 0.1, 0.05):
+        _, hits = height_scan(model, data, np.array([x, 0.0, origin_z]), 0.0, cfg, ceilings)
+        np.testing.assert_allclose(hits[:, 2], 0.0, atol=1e-5)
+    # The climb is not a ceiling: rays over it report its top.
+    platform = climb.boxes[0]
+    top = platform.pos[2] + platform.size[2]
+    on_platform = platform.pos[0] - platform.size[0] + 0.45  # the 2 m grid fits on a 2-3 m climb
+    _, hits = height_scan(model, data, np.array([on_platform, 0.0, top + 1.0]), 0.0, cfg, ceilings)
+    np.testing.assert_allclose(hits[:, 2], top, atol=1e-5)
+
+
+def test_overhead_scan_ignores_obstacles_taller_than_the_ray_origin():
     from dataclasses import replace
     import mujoco
     from g1_parkour.mdp.observations import ObservationCfg, overhead_scan
     from g1_parkour.terrain.parkour import MODULES, Cursor
 
     cfg = ObservationCfg(overhead_scan=True)
-    built = MODULES[module](np.random.default_rng(0), 1.0, Cursor())
+    built = MODULES["hurdle"](np.random.default_rng(0), 1.0, Cursor())
+    # Hurdles now stop at the 0.5 m ray origin; raise one to the old 0.65 m so the ray starts inside it.
     obstacle = max(built.boxes, key=lambda box: box.pos[2] + box.size[2])
-    assert obstacle.pos[2] + obstacle.size[2] > cfg.overhead_origin_height  # the ray starts inside it
+    built.boxes[built.boxes.index(obstacle)] = obstacle = replace(
+        obstacle, pos=(obstacle.pos[0], obstacle.pos[1], 0.325), size=(*obstacle.size[:2], 0.325),
+    )
+    assert obstacle.pos[2] + obstacle.size[2] > cfg.overhead_origin_height
     geoms = "".join(replace(box, material=None).to_xml() for box in built.boxes)
     model = mujoco.MjModel.from_xml_string(f"<mujoco><worldbody>{geoms}</worldbody></mujoco>")
     data = mujoco.MjData(model)
@@ -346,14 +417,14 @@ def test_overhead_observations_and_markers(monkeypatch, debug_markers, delay, in
     try:
         obs, _ = env.reset(seed=0)
         assert obs.shape == ((116,) if include_observation else (113,))
-        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.55])
+        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.7])
         if include_observation:
-            np.testing.assert_allclose(obs[-3:], [2.0, 2.0, 0.55])
+            np.testing.assert_allclose(obs[-3:], [2.0, 2.0, 0.7])
         assert len(env._overhead_marker_ids) == (3 if debug_markers else 0)
         if debug_markers:
             np.testing.assert_allclose(
                 env.data.geom_xpos[env._overhead_marker_ids],
-                [[0.0, 0.0, -50.0], [0.0, 0.0, -50.0], [1.75, 0.0, 1.05]],
+                [[0.0, 0.0, -50.0], [0.0, 0.0, -50.0], [1.75, 0.0, 1.2]],
             )
             np.testing.assert_allclose(
                 env.model.geom_pos[env._overhead_marker_ids],
@@ -366,7 +437,7 @@ def test_overhead_observations_and_markers(monkeypatch, debug_markers, delay, in
         np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 2.0])
         obs, _ = env.reset(seed=0)
         assert len(env._overhead_buffer) == 1
-        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.55])
+        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.7])
         env.cfg.observation.overhead_scan = False
         legacy_obs = env._compute_observation()
         assert legacy_obs.shape == (113,)
@@ -508,8 +579,13 @@ def test_regular_presets_share_observation_layout_and_policy():
     from g1_parkour.mdp import ObservationCfg
 
     configs = [tasks.flat_cfg(), tasks.rough_cfg(), tasks.parkour_cfg()]
+    # Where the rays land and how deep a miss reads may differ per stage (Procedural scans at
+    # 0.2 m and clips misses at -0.5); every term, its size and order may not.
+    placement = {"scan_forward", "scan_lateral", "scan_clip", "scan_points"}
     for cfg in configs:
         for field in fields(ObservationCfg):
+            if field.name in placement:
+                continue
             np.testing.assert_equal(
                 getattr(cfg.observation, field.name),
                 getattr(configs[0].observation, field.name),
@@ -614,18 +690,96 @@ def test_height_reward_allows_tunnel_crouching_and_airborne_motion(
     env = ParkourEnv.__new__(ParkourEnv)
     env.cfg = tasks.parkour_cfg()
     assert env.cfg.reward.base_height > 0.0
-    env.model = SimpleNamespace(geom_group=np.array([0, 1]), geom_rbound=np.array([0.09, 0.0]))
+    env.model = SimpleNamespace(
+        geom_group=np.array([0, 1]), geom_rbound=np.array([0.09, 0.0]),
+        geom_type=np.array([2, 6]), geom_size=np.array([[0.09, 0.0, 0.0], [1.0, 1.0, 1.0]]),
+    )
+    env._ceiling_geom_ids = frozenset()
     contact = SimpleNamespace(geom1=0, geom2=1, dist=-0.001,
                               frame=np.array([0.0, 0.0, 1.0]), pos=np.zeros(3))
     env.data = SimpleNamespace(
         qpos=np.array([0.0, 0.0, height, 1.0, 0.0, 0.0, 0.0]),
         geom_xpos=np.array([[0.0, 0.0, height + 0.19], [0.0, 0.0, 0.0]]),
+        geom_xmat=np.tile(np.eye(3).ravel(), (2, 1)),
         contact=[contact] if supported else [],
     )
     depth = (env.cfg.observation.overhead_max_depth if clearance is None
              else clearance - env.cfg.observation.overhead_origin_height)
     monkeypatch.setattr(mdp, "overhead_scan", lambda *args: (np.full(3, depth), np.zeros((3, 3))))
     assert env._height_reward_error(surface_z) == pytest.approx(expected)
+
+
+def test_ceiling_clearance_pulls_the_robot_under_a_tunnel_bar():
+    import mujoco
+    from g1_parkour.env import ParkourEnv
+    from g1_parkour.mdp.rewards import RewardCfg, terms
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": ("tunnel",)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = 1.0
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        for _ in range(20):
+            env.step(np.zeros(env.model.nu))
+        bar = next(b for b in env.terrain.boxes if b.ceiling)
+        underside = bar.pos[2] - bar.size[2]
+        margin = cfg.reward.base_height_clearance_margin
+        # No ceiling in reach of the upward rays: nothing to duck under.
+        env.data.qpos[0] = bar.pos[0] - 1.0
+        mujoco.mj_forward(env.model, env.data)
+        assert env._ceiling_overlap() == 0.0
+        # Standing upright with the bar overhead: the top is this far above underside - margin.
+        env.data.qpos[0] = bar.pos[0]
+        mujoco.mj_forward(env.model, env.data)
+        overlap = env._ceiling_overlap()
+        assert overlap == pytest.approx(env._robot_top_z() - (underside - margin))
+        assert 0.3 < overlap < 0.4  # 1.53 m head top under a 1.2 m bar
+        # Crouched low enough, it is free.
+        env.data.qpos[2] -= overlap + 0.01
+        mujoco.mj_forward(env.model, env.data)
+        assert env._ceiling_overlap() == 0.0
+    finally:
+        env.close()
+    reward = RewardCfg(ceiling_clearance=-3.0)
+    state = dict(dt=0.015, progress=0.0, heading_alignment=0.0, upright=1.0, height_error=0.0,
+                 lateral_speed=0.0, ang_vel=np.zeros(3), action=np.zeros(2), prev_action=np.zeros(2),
+                 torque_power=0.0, joint_limit_violation=0.0, waypoints_reached=0, reached_goal=False,
+                 fell=False)
+    assert terms(reward, ceiling_overlap=0.38, **state)["ceiling_clearance"] == pytest.approx(-1.14)
+    assert "ceiling_clearance" not in terms(reward, ceiling_overlap=0.0, **state)
+
+
+def test_a_tunnel_bar_touched_from_below_is_not_support():
+    from types import SimpleNamespace
+    from g1_parkour.env import ParkourEnv
+
+    env = ParkourEnv.__new__(ParkourEnv)
+    env.model = SimpleNamespace(geom_group=np.array([0, 1, 1]))
+    env.data = SimpleNamespace(qpos=np.array([0.0, 0.0, 1.25, 1.0, 0.0, 0.0, 0.0]), contact=[
+        SimpleNamespace(geom1=0, geom2=1, dist=-0.001, frame=np.array([0.0, 0.0, 1.0]), pos=np.zeros(3)),
+        # A forearm held level presses up on the bar's underside, just below the torso.
+        SimpleNamespace(geom1=0, geom2=2, dist=-0.001, frame=np.array([0.0, 0.0, -1.0]),
+                        pos=np.array([0.3, 0.0, 1.2])),
+    ])
+    env._ceiling_geom_ids = frozenset({2})
+    assert env._support_surface_z() == pytest.approx(0.0)
+    env._ceiling_geom_ids = frozenset()
+    assert env._support_surface_z() == pytest.approx(1.2)  # the old reading: floor at bar height
+
+
+def test_robot_top_is_exact_for_a_level_capsule():
+    from types import SimpleNamespace
+    from g1_parkour.env import ParkourEnv
+
+    env = ParkourEnv.__new__(ParkourEnv)
+    # A level forearm: capsule radius 0.04, half-length 0.15, its axis along world x.
+    level = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]).ravel()
+    env.model = SimpleNamespace(geom_group=np.array([0]), geom_type=np.array([3]),
+                                geom_size=np.array([[0.04, 0.15, 0.0]]), geom_rbound=np.array([0.19]))
+    env.data = SimpleNamespace(geom_xpos=np.array([[0.0, 0.0, 1.2]]), geom_xmat=level[None])
+    assert env._robot_top_z() == pytest.approx(1.24)  # the bounding sphere said 1.39
 
 
 @pytest.mark.parametrize("overshoot", [False, True])
@@ -674,6 +828,13 @@ def test_parkour_difficulty_changes_geometry():
     hard = build_terrain("parkour", np.random.default_rng(3), difficulty=1.0, num_modules=8)
     assert easy.modules == hard.modules
     assert hard.course_length != easy.course_length
+
+
+@pytest.mark.parametrize("difficulty, modules", [(0.0, 4), (0.05, 4), (0.125, 5), (0.5, 6), (0.9, 8), (1.0, 8)])
+def test_procedural_courses_grow_from_four_to_eight_modules(difficulty, modules):
+    cfg = tasks.parkour_cfg()
+    course = build_terrain("parkour", np.random.default_rng(0), difficulty=difficulty, **cfg.terrain.params)
+    assert len(course.modules) == modules + 1  # plus the start pad
 
 
 def test_curriculum_promotes_on_reliable_full_runs():
@@ -992,6 +1153,207 @@ def test_gait_terms_reward_single_stance_and_penalise_sliding():
     cfg.feet_step_symmetry = -5.0
     assert terms(cfg, feet_step_asymmetry=0.75, **state)["feet_step_symmetry"] == pytest.approx(-3.75)
     assert "feet_step_symmetry" not in terms(cfg, feet_step_asymmetry=0.75, **dict(state, target_speed=0.0))
+    cfg.feet_stumble = -1.0
+    assert terms(cfg, stumbling=True, **state)["feet_stumble"] == pytest.approx(-1.0)
+    assert terms(cfg, stumbling=True, **dict(state, target_speed=0.0))["feet_stumble"] == pytest.approx(-1.0)
+    assert "feet_stumble" not in terms(cfg, stumbling=False, **state)
+    cfg.feet_edge = -0.5
+    assert terms(cfg, feet_at_edge=2, **state)["feet_edge"] == pytest.approx(-1.0)
+    assert "feet_edge" not in terms(cfg, feet_at_edge=0, **state)
+
+
+def test_feet_at_edge_needs_a_drop_next_to_the_supporting_foot():
+    import mujoco
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.rough_cfg()
+    cfg.terrain.difficulty = 1.0
+    cfg.terrain.curriculum = False
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        for _ in range(10):  # stand, so the contact buffer holds real entries to overwrite
+            env.step(np.zeros(env.model.nu))
+        blocks = [g for g in range(env.model.ngeom) if env.model.geom(g).name.startswith("rough_block")]
+        block = max(blocks, key=lambda g: env.data.geom_xpos[g, 2] + env.model.geom_size[g, 2])
+        centre, half = env.data.geom_xpos[block], env.model.geom_size[block]
+        top = centre[2] + half[2]
+        foot = next(iter(env._foot_geom_ids[0]))
+        contact = env.data.contact[0]
+        expectations = (
+            (centre[:2], 0),                                     # middle of the block top
+            (centre[:2] + (half[0] - 0.03, 0.0), 1),             # 3 cm from its +x side
+            (centre[:2] - (0.0, half[1] - 0.03), 1),             # 3 cm from its -y side
+            (centre[:2] + (half[0] - 0.08, 0.0), 0),             # 8 cm in: outside the margin
+        )
+        for xy, expected in expectations:
+            env.data.ncon = 1
+            contact.geom1, contact.geom2 = block, foot
+            contact.frame[:3] = (0.0, 0.0, 1.0)
+            contact.pos[:] = (xy[0], xy[1], top)
+            assert env._feet_at_edge() == expected, xy
+        # Standing on the heightfield next to the block is not an edge: the block rises, not drops.
+        hfield = next(g for g in range(env.model.ngeom) if env.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_HFIELD)
+        beside = centre[:2] + (half[0] + 0.03, 0.0)
+        contact.geom1 = hfield
+        contact.pos[:] = (*beside, env._terrain_height_below(beside + (0.05, 0.0), top + 1.0))
+        assert env._feet_at_edge() == 0
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("skill", ["stairs_up", "stairs_down"])
+def test_feet_at_edge_on_stairs_only_near_the_drop_and_by_sole_centre(skill):
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": (skill,)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = 1.0  # shallowest treads: 0.32 m
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        for _ in range(10):  # stand, so the contact buffer holds real entries to overwrite
+            env.step(np.zeros(env.model.nu))
+        stairs = sorted(
+            (b for b in env.terrain.boxes if b.name.startswith("stair_") and "top" not in b.name),
+            key=lambda b: b.pos[0] - b.size[0],
+        )
+        run = (stairs[2].pos[0] - stairs[2].size[0]) - (stairs[1].pos[0] - stairs[1].size[0])
+        tread = stairs[1]
+        back, top, geom = tread.pos[0] - tread.size[0], tread.pos[2] + tread.size[2], env.model.geom(tread.name).id
+        drop = back if skill == "stairs_up" else back + run  # the edge this tread falls away at
+        inward = 1.0 if skill == "stairs_up" else -1.0
+        foot = next(iter(env._foot_geom_ids[0]))
+
+        def flagged(*xs):
+            env.data.ncon = len(xs)
+            for contact, x in zip(env.data.contact, xs):
+                contact.geom1, contact.geom2 = geom, foot
+                contact.frame[:3] = (0.0, 0.0, 1.0)
+                contact.pos[:] = (x, tread.pos[1], top)
+            return env._feet_at_edge()
+
+        # A point foot: only the last 5 cm before the drop, never the rest of the tread.
+        assert flagged(drop + inward * 0.03) == 1
+        for depth in np.arange(0.06, run - 0.01, 0.02):
+            assert flagged(drop + inward * depth) == 0, depth
+        # A 0.21 m sole touching at heel and toe: its toe 2 cm from the drop with the sole
+        # centre 12.5 cm in is fine; centred 2 cm from the drop, half the sole hangs over it.
+        assert flagged(drop + inward * 0.02, drop + inward * 0.23) == 0
+        assert flagged(drop - inward * 0.085, drop + inward * 0.125) == 1
+    finally:
+        env.close()
+
+
+def test_beam_starts_wider_than_the_scan_and_narrows_with_difficulty():
+    from g1_parkour.terrain.parkour import Cursor, mod_beam
+
+    widths = [2.0 * mod_beam(np.random.default_rng(0), d, Cursor()).boxes[0].size[1] for d in np.linspace(0, 1, 11)]
+    assert widths[0] == pytest.approx(1.0) and widths[-1] == pytest.approx(0.28)
+    assert all(a > b for a, b in zip(widths, widths[1:]))
+    # At d=0 every ray of Procedural's ground scan lands on the beam.
+    assert widths[0] / 2.0 > np.abs(tasks.parkour_cfg().observation.scan_lateral).max()
+
+
+@pytest.mark.parametrize("difficulty", [0.0, 0.5, 1.0])
+def test_climb_rises_straight_from_the_floor_edge(difficulty):
+    from g1_parkour.terrain.parkour import PLATFORM_THICKNESS, Cursor, mod_climb
+
+    cursor = Cursor(x=5.0, z=1.0)
+    climb = mod_climb(np.random.default_rng(0), difficulty, cursor).boxes[0]
+    assert climb.pos[0] - climb.size[0] == pytest.approx(5.0)  # no gap before the riser
+    assert climb.pos[2] + climb.size[2] == pytest.approx(1.0 + 0.15 + 0.3 * difficulty**2)
+    # The riser is solid down to the floor slab's underside: no slot under it at any rise.
+    assert climb.pos[2] - climb.size[2] == pytest.approx(1.0 - PLATFORM_THICKNESS)
+    assert cursor.z == pytest.approx(climb.pos[2] + climb.size[2])
+
+
+@pytest.mark.parametrize("difficulty", [0.0, 1.0])
+def test_gap_stays_within_a_long_stride(difficulty):
+    from g1_parkour.terrain.parkour import Cursor, mod_gap
+
+    widths = []
+    for seed in range(50):
+        cursor = Cursor(x=5.0)
+        landing = mod_gap(np.random.default_rng(seed), difficulty, cursor).boxes[0]
+        widths.append(landing.pos[0] - landing.size[0] - 5.0)
+    nominal = 0.3 + 0.5 * difficulty
+    assert nominal * 0.9 - 1e-9 <= min(widths) and max(widths) <= nominal * 1.1 + 1e-9
+    assert max(widths) < 0.9  # the humanoid's longest stride
+
+
+@pytest.mark.parametrize("difficulty", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_stepping_stones_are_one_even_step_apart_at_both_ends(difficulty, seed):
+    from g1_parkour.terrain.parkour import Cursor, mod_stepping_stones
+
+    cursor = Cursor(x=5.0)
+    built = mod_stepping_stones(np.random.default_rng(seed), difficulty, cursor)
+    *stones, landing = built.boxes
+    edges = [(5.0 - 1.0, 5.0)]  # the previous section ends at the cursor
+    edges += [(b.pos[0] - b.size[0], b.pos[0] + b.size[0]) for b in stones + [landing]]
+    gaps = [nxt[0] - prev[1] for prev, nxt in zip(edges, edges[1:])]
+    # One gap before, between and after the stones: a crack at d=0, at most 0.3 m.
+    np.testing.assert_allclose(gaps, gaps[0], atol=1e-9)
+    assert gaps[0] == pytest.approx(0.1 + 0.2 * difficulty)
+    # Consecutive stones overlap sideways, so no step is a sideways jump.
+    for a, b in zip(stones, stones[1:]):
+        overlap = min(a.pos[1] + a.size[1], b.pos[1] + b.size[1]) - max(a.pos[1] - a.size[1], b.pos[1] - b.size[1])
+        assert overlap >= 0.1 - 1e-9
+    assert cursor.x == pytest.approx(landing.pos[0] + landing.size[0])
+    assert built.waypoints[-1][0] == pytest.approx(cursor.x)
+
+
+@pytest.mark.parametrize("difficulty", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_ramps_meet_their_platforms_without_a_step_or_notch(difficulty, seed):
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": ("ramp",)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = difficulty
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=seed)  # seeds 0 and 1 give a descending and an ascending ramp
+        top = next(b for b in env.terrain.boxes if b.name.startswith("ramp_top"))
+        start = next(b for b in env.terrain.boxes if b.name == "start_pad")
+        for junction in (start.pos[0] + start.size[0], top.pos[0] - top.size[0]):
+            # Offset off the exact boundary: box positions are written to the XML at 0.1 mm, which
+            # leaves seams of a fraction of a millimetre that a ray placed exactly on them slips through.
+            xs = np.arange(junction - 0.15, junction + 0.15, 0.01) + 0.0033
+            zs = np.array([env._terrain_height_below(np.array([x, 0.0]), 20.0) for x in xs])
+            # At most the slope itself between 1 cm samples (22 deg: 4 mm); the old notch was 14 cm.
+            assert np.abs(np.diff(zs)).max() < 0.006, (junction, zs)
+    finally:
+        env.close()
+
+
+def test_stumbling_detects_leg_contact_with_block_sides_not_tops():
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.rough_cfg()
+    cfg.events.reset_noise_scale = 0.0
+    cfg.events.reset_yaw_range = 0.0
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        for _ in range(10):
+            env.step(np.zeros(env.model.nu))
+        assert env._foot_contacts().any() and not env._stumbling()  # standing on the ground
+
+        block = next(g for g in range(env.model.ngeom) if env.model.geom_group[g] == 1)
+        foot = next(iter(env._foot_geom_ids[0]))
+        shin = next(iter(env._leg_geom_ids - set().union(*env._foot_geom_ids)))
+        contact = env.data.contact[0]
+        for leg_geom, normal_z, stumbling in ((foot, 0.1, True), (shin, -0.2, True), (foot, 0.9, False)):
+            env.data.ncon = 1
+            contact.geom1, contact.geom2 = block, leg_geom
+            contact.frame[:3] = (np.sqrt(1.0 - normal_z**2), 0.0, normal_z)
+            assert env._stumbling() is stumbling
+    finally:
+        env.close()
 
 
 def _place_feet(env, contacts, positions):
@@ -1220,6 +1582,25 @@ def _rubble_test_model():
     return model, nominal
 
 
+@pytest.mark.parametrize("cfg_factory", [tasks.flat_cfg, tasks.rough_cfg, tasks.parkour_cfg])
+def test_terrain_friction_decides_contacts_even_below_the_feet(cfg_factory):
+    from g1_parkour.env import ParkourEnv
+
+    env = ParkourEnv(cfg_factory())
+    try:
+        env.reset(seed=0)
+        feet = set().union(*env._foot_geom_ids)
+        env.model.geom_friction[env.model.geom_group == 1, 0] = 0.3  # ice under the feet
+        env.model.geom_friction[list(feet), 0] = 1.0
+        for _ in range(15):
+            env.step(np.zeros(env.model.nu))
+        used = [c.friction[0] for c in env.data.contact[: env.data.ncon] if c.geom1 in feet or c.geom2 in feet]
+        assert used
+        np.testing.assert_allclose(used, 0.3)  # the larger of the two would have been 1.0
+    finally:
+        env.close()
+
+
 def test_rubble_friction_randomization_tints_sections_ice_or_mud():
     import mujoco
     from g1_parkour.mdp import events
@@ -1232,6 +1613,7 @@ def test_rubble_friction_randomization_tints_sections_ice_or_mud():
     mud_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MATERIAL, "MatMud")
 
     cfg = events.EventCfg(randomize_friction=True)
+    low, high = cfg.friction_range
     section0, section1 = [], []
     for seed in range(30):
         events.randomize_model(model, np.random.default_rng(seed), cfg, nominal)
@@ -1239,10 +1621,10 @@ def test_rubble_friction_randomization_tints_sections_ice_or_mud():
         assert model.geom_friction[run, 0] == pytest.approx(model.geom_friction[block0, 0])
         scale0 = model.geom_friction[run, 0]
         scale1 = model.geom_friction[gid["rubble_1_0"], 0]
-        assert 0.5 - 1e-9 <= scale0 <= 1.5 + 1e-9
+        assert low - 1e-9 <= scale0 <= high + 1e-9
         section0.append(scale0)
         section1.append(scale1)
-        t = float(np.clip(scale0 - 0.5, 0.0, 1.0))
+        t = float(np.clip((scale0 - low) / (high - low), 0.0, 1.0))
         expected = np.tile(t * events.MUD_RGBA + (1.0 - t) * events.ICE_RGBA, (2, 1))
         np.testing.assert_allclose(model.geom_rgba[[run, block0]], expected, atol=1e-6)
         assert model.geom_matid[run] == (mud_id if t >= 0.5 else ice_id)
@@ -1256,10 +1638,10 @@ def test_rubble_friction_randomization_tints_sections_ice_or_mud():
         def uniform(self, *args, **kwargs):
             return self.value
 
-    events.randomize_rubble_sections(model, _FixedRng(0.5), cfg, nominal)
+    events.randomize_rubble_sections(model, _FixedRng(low), cfg, nominal)
     assert model.geom_matid[gid["rubble_0_0"]] == ice_id
     assert model.geom_rgba[gid["rubble_0_0"], 2] == pytest.approx(events.ICE_RGBA[2])
-    events.randomize_rubble_sections(model, _FixedRng(1.5), cfg, nominal)
+    events.randomize_rubble_sections(model, _FixedRng(high), cfg, nominal)
     assert model.geom_matid[gid["rubble_0_0"]] == mud_id
     assert model.geom_rgba[gid["rubble_0_0"], 2] == pytest.approx(events.MUD_RGBA[2])
 
@@ -1592,6 +1974,46 @@ def test_resume_restores_difficulty_into_the_real_environments(tmp_path):
         assert train.restore_difficulties(venv, tmp_path / "missing.zip", num_envs=2) is None
         with pytest.raises(ValueError):
             train.restore_difficulties(venv, checkpoint, num_envs=3)
+        # A checkpoint from another task keeps this task's initial difficulty.
+        (tmp_path / "run_config.json").write_text(json.dumps({"arguments": {"task": "Rough"}}))
+        assert train.checkpoint_task(checkpoint) == "Rough"
+        assert train.restore_difficulties(venv, checkpoint, num_envs=2, task="Rough") == [0.4, 0.6]
+        venv.env_method("set_difficulty", 0.0)
+        assert train.restore_difficulties(venv, checkpoint, num_envs=2, task="Procedural") is None
+        assert [env._difficulty for env in real] == [0.0, 0.0]
+    finally:
+        venv.close()
+
+
+def test_inputs_constant_in_a_checkpoint_are_adopted_without_changing_the_policy():
+    import torch as th
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from scripts import train
+
+    venv = VecNormalize(make_vec_env("Rough", n_envs=1, seed=0, vec_env_cls=DummyVecEnv))
+    try:
+        model = PPO("MlpPolicy", venv, n_steps=64, batch_size=32, seed=0, device="cpu")
+        rms = venv.obs_rms
+        rms.mean[:] = 0.5
+        rms.var[:] = 0.3
+        rms.mean[-3:], rms.var[-3:] = 2.0, [2e-12, 5e-6, 7e-6]  # the upward scan through Rough
+        rms.var[8] = 5e-3  # a real input that barely varies stays as it is
+        obs = np.random.default_rng(0).normal(size=(4, rms.mean.size)).astype(np.float32)
+        obs[:, -3:] = 2.0  # no ceiling, as the checkpoint always saw
+        before = model.policy.predict(venv.normalize_obs(obs), deterministic=True)[0]
+        value_before = model.policy.predict_values(th.as_tensor(venv.normalize_obs(obs))).detach()
+        assert train.adopt_constant_inputs(model, venv) == [113, 114, 115]
+        np.testing.assert_allclose(rms.var[-3:], 1.0)
+        assert rms.var[8] == pytest.approx(5e-3)
+        np.testing.assert_allclose(model.policy.predict(venv.normalize_obs(obs), deterministic=True)[0], before, atol=1e-6)
+        assert th.allclose(model.policy.predict_values(th.as_tensor(venv.normalize_obs(obs))), value_before, atol=1e-6)
+        # A 0.7 m ceiling now reads -1.3, where it read -10 (clipped) through random weights.
+        ceiling = obs.copy()
+        ceiling[:, -3:] = 0.7
+        np.testing.assert_allclose(venv.normalize_obs(ceiling)[:, -3:], -1.3, atol=1e-6)
+        assert train.adopt_constant_inputs(model, venv) == []  # nothing left to adopt
     finally:
         venv.close()
 
@@ -1827,3 +2249,29 @@ def test_short_training_saves_final_or_interrupted(monkeypatch, tmp_path, interr
     assert value_loss[0].value == 239.0
     if interrupted:
         assert events.Scalars("train/entropy_loss")[0].value == pytest.approx(-3.06)
+
+
+def test_rebuilt_world_renders_through_the_same_viewer():
+    from g1_parkour.env import ParkourEnv
+
+    def make():
+        return ParkourEnv(tasks.parkour_cfg(), render_mode="rgb_array", camera_name="side_view", width=160, height=120)
+
+    # Closing a renderer terminates GLFW for the whole process, so one env at a time.
+    env = make()
+    try:
+        env.reset(seed=0)
+        env.render()
+        viewer = env._mujoco_renderer.viewer
+        env.reset(seed=1)  # Procedural rebuilds the course on every reset
+        frame = env.render()
+        assert env._mujoco_renderer.viewer is viewer and viewer.model is env.model
+    finally:
+        env.close()
+    fresh = make()
+    try:
+        fresh.reset(seed=0)
+        fresh.reset(seed=1)
+        np.testing.assert_array_equal(frame, fresh.render())
+    finally:
+        fresh.close()

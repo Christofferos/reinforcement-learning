@@ -23,6 +23,25 @@ python scripts/play.py Procedural --checkpoint models/<run>/final.zip
 python scripts/play.py Procedural --checkpoint models/<run>/final.zip --difficulty 0.3
 ```
 
+Training options worth knowing:
+
+- Keep Mac running in backpack: `sudo pmset -a disablesleep 1` before the run and `sudo pmset -a disablesleep 0` afterwards.
+- Keep Mac running when plugged in: `caffeinate -ims`
+- `--subproc` steps the environments in parallel worker processes instead of one after
+  another in the main process. Rough on an 8-core Mac: 919 → 2250 environment steps/s
+- `--max-std` caps the learned action noise, also on a resumed policy before its first
+  rollout. Actions are clipped to [−1, 1], so once the noise overshoots the limits nothing in
+  the reward pulls it back while the entropy bonus pushes it up: `rough_0.0.2` drifted to a
+  std of 2.32 with 66% of its training actions clipped, and reached 4/40 goals at `d` = 1
+  with that noise against 10/40 without. Keep `--ent-coef` above 0 with a cap, so the std
+  stays near it instead of shrinking.
+
+```bash
+caffeinate -i python scripts/train.py Rough --run-name rough_0.0.3 \
+  --resume models/rough_0.0.2/checkpoint_180958824_steps.zip \
+  --num-envs 8 --subproc --max-std 0.5 --hours 8
+```
+
 Playback runs at one fixed difficulty with the curriculum off. It uses `--difficulty` when
 given, otherwise the mean level saved in the checkpoint's `.state.json`, otherwise the task's
 starting difficulty, and prints which one it picked.
@@ -49,8 +68,19 @@ Procedural --timesteps 30_000_000
 ### Tensorflow monitoring:
 
 ```bash
-python -m tensorboard.main --logdir logs --host 127.0.0.1 --port 6006
+python -m tensorboard.main --logdir logs --host 127.0.0.1 --port 6007
 ```
+
+### Versioning
+
+`Example: flat_0.0.1, rough_0.0.1, procedural_0.0.1`
+
+- x.y.z:
+- x is major breaking changes,
+- y is minor breaking changes (different obs dim),
+- z is patch / iteration (same observation dimensions).
+
+All models with identical x and y versions share observational dim.
 
 Cameras: `side_view`, `chase_view`, `front_view`, `egocentric`.
 
@@ -108,7 +138,7 @@ python scripts/list_envs.py --keyword ablation
 | ----------------------- | -------------------------- | ------------------------------------------------------- |
 | `Flat`                  | flat plane                 | curriculum: faster commands, wider turns, longer routes |
 | `Rough`                 | noise heightfield + blocks | speed commands, curriculum, friction/mass randomisation |
-| `Procedural`            | random skill chain         | curriculum, pushes, friction/mass randomisation         |
+| `Procedural`            | random skill chain         | curriculum, friction/mass/gear randomisation, no pushes |
 | `Parkour-Ablation-*-v0` | random skill chain         | one MDP change each, see below                          |
 
 All three regular presets enable 45 ground-scan debug dots. Press `2` in the
@@ -123,8 +153,8 @@ Their distances are capped at 2 m (also the no-hit value) and follow the
 configured observation delay. The spacing is below the 0.24 m thickness of the tunnel bar,
 so the bar is always seen from 0.52 m ahead until it is 0.12 m behind the torso. The earlier
 0 / 0.5 / 1 m layout looked further ahead but missed the bar entirely while its centre was
-0.13-0.38 m or 0.63-0.88 m ahead. A ray that starts inside a terrain box (a hurdle or climb
-taller than 0.5 m, or stairs rising more than that within the ray's reach) reads as a miss
+0.13-0.38 m or 0.63-0.88 m ahead. A ray that starts inside a terrain box (stairs rising more than 0.5 m within the ray's
+reach; hurdles and climbs now stop at 0.5 and 0.45 m) reads as a miss
 instead of reporting the box's top face as a low ceiling. That false ceiling also lowered the
 `base_height` target, asking the robot to crouch before climbs. The layout keeps three
 readings, so the observation size is unchanged, but a Procedural policy trained on the old
@@ -145,7 +175,72 @@ by this playback option.
 `run`, `gap`, `stepping_stones`, `hurdle`, `stairs_up`, `stairs_down`, `ramp`, `beam`,
 `tunnel` (duck under), `climb`, `lateral_shift` (turn), `rubble`.
 
-A course is `start_pad → N random modules → finish_pad`, with the per-module difficulty
+- **Climb**: a step up of 0.15 + 0.3 `d`² m (0.15 m at `d` = 0, 0.23 m at 0.5, 0.45 m at 1), rising straight from the end
+  of the floor so the robot can stand against the riser before stepping up. The block reaches
+  down to the floor's underside, so no slot opens under a riser taller than the 0.4 m platform
+  thickness. The humanoid's knee is 0.43 m and its hip 0.79 m above the floor and it has no
+  hands; the earlier 0.3-0.75 m rise after a 0.2-0.6 m gap topped out at 95% of hip height, and
+  a 0.1-0.3 m gap before the riser remained until now.
+- **Tunnel bar**: marked `Box(ceiling=True)`. Downward ground rays continue below it, so a
+  standing robot's ground scan reads the tunnel floor; before, from `d` = 0.25 up, the bar
+  spanned the rays' start height (0.1 m above the torso) and up to five rays read it as a
+  1.3 m wall. The upward overhead scan still sees it. Clearance is 1.45 m at `d` = 0 to 1.2 m
+  at `d` = 1, a 0.33 m duck below the standing head top (1.53 m); it went down to 1.05 m.
+  The upward rays stay at 0, 0.2 and 0.4 m ahead: shifting them 0.2 m forward would see the
+  bar 0.2 m earlier but lose it while it is still over the head, and the crouch target in
+  `base_height` comes from the same rays. `ceiling_clearance` (−3 per metre per step) charges
+  for every metre the robot's top is above the lowest ceiling those rays see, less 5 cm:
+  −1.14 per step standing upright under a `d` = 1 bar, where the quadratic `base_height`
+  target charged −0.072. A tunnel bar touched from below no longer counts as the ground
+  the robot stands on, which had read the floor at bar height and asked it to stand up.
+- **Hurdle**: 0.2 + 0.3 `d`² m (0.2 m at `d` = 0, 0.28 m at 0.5, 0.5 m at 1; 63% of hip height);
+  it went to 0.65 m. Hurdle and climb grow with `d`² because `procedural_0.0.2` stepped over or
+  onto 0.20 m every time and failed from 0.24 m: linear growth put every obstacle at
+  `d` = 0.38 past that line, so it practised only obstacles it always failed.
+- **Gap**: 0.3 m at `d` = 0 to 0.8 m at `d` = 1, ±10%, up to the humanoid's ~0.9 m longest
+  stride with each foot 5 cm off the edges. It went from 0.45 m to 1.5 m ±15%, up to a 1.73 m
+  running long jump for a walker stepping 0.3-0.45 m.
+- **Beam**: 1.0 m wide at `d` = 0 to 0.28 m at `d` = 1. At 1.0 m every ray of Procedural's
+  ±0.4 m ground scan lands on it, so it starts out reading like a walkway; the outer rays hang
+  over the pit from about `d` = 0.3. It started at 0.6 m, with 18 of 45 rays over the pit.
+- **Stepping stones**: 3-6 stones from 0.8 m to 0.5 m square, with one edge-to-edge gap
+  before the first, between stones and after the last: 0.1 m at `d` = 0 to 0.3 m at `d` = 1,
+  so the longest step needed is 0.4 m. Neighbours sit at most 0.4 m apart sideways and
+  overlap by at least 0.1 m. Stone centres used to be evenly spaced from the previous section
+  with the landing reaching 0.6 m back, so at `d` = 1 the first gap was a 1.07 m jump and at
+  `d` = 0 the last stone overlapped the landing.
+- **Speed commands and rewards**: Procedural samples Rough's `[0.3, 1.2]` m/s with no
+  difficulty shift. It used `[0.5 + d, 2.0 + d]`, up to 3 m/s against a ~1 m/s walker. Its
+  posture and smoothness weights (`alive` 0.05, `action_rate` and `angular_velocity` −0.01)
+  and tracking sigma (0.35) now come from `LOCOMOTION_REWARDS` like Flat's and Rough's.
+- **Resuming from another stage** (`--resume` a Rough checkpoint into Procedural) starts at
+  the new task's initial difficulty; the saved curriculum level is only restored within a task.
+- **Viewer**: rebuilding the course keeps the viewer window and points it at the new model.
+  Closing it on every rebuild (every Procedural reset) terminated GLFW, which could leave the
+  screen black after a reset.
+
+Procedural-only settings (same 116-value observation, so Rough checkpoints still resume):
+
+- **Ground scan at 0.2 m**: the 9 × 5 rays span 0.2 m behind to 1.4 m ahead and ±0.4 m, so
+  any gap or crack 0.2 m or wider is always under a ray (0.2 m stone cracks were missed 22%
+  of the time at 0.25 m) and edges are placed to within ±0.1 m. Cracks narrower than the
+  spacing still flicker; at 0.1 m no foot fits in them.
+- **Off-course rays read −0.5**, not −1.0. Normalised on Rough's scale (std ~0.12 m), −1.0
+  was −7 std and saturated ~30% of the first tanh layer on beams, stones and gaps (12-26% at
+  −0.5). `procedural_0.0.1` failed every beam (0/20) and passed 4/20 with misses at −0.5 and
+  14/20 at −0.3; −0.5 keeps pits clearly apart from steps down. Readings are taken from the
+  torso (1.25 m minus the drop from 0.1 m above it), so flat ground under a robot at its
+  nominal height reads −0.1 and the −0.5 clip sits 0.4 m below the floor it stands on
+  (0.55 m when crouched to 1.1 m). In the viewer, a clipped ray's dot stops at that reading
+  and turns magenta instead of falling into the pit.
+- **Extra practice where the last run failed** (`skill_weights`): hurdle, climb and stepping
+  stones 3×, gap 1.5×, the rest 1× (~16% of modules each for the weighted three, ~5% for the
+  rest). `procedural_0.0.1` failed beam, stones and gap at `d` = 0, which capped full-course
+  success near 22%; 3× practice on those let `procedural_0.0.2` climb to `d` = 0.38 with beams
+  at 0% and gaps at 6-20% failure, leaving hurdles (100%), climbs (36-71%) and stones (22-55%).
+
+A course is `start_pad → N random modules → finish_pad`, N growing from 4 at `d` = 0 to 8
+at `d` = 1 (`num_modules` + `num_modules_growth`), with the per-module difficulty
 ramping up along the course. `difficulty ∈ [0, 1]` scales gap widths, step heights, beam
 narrowness, overhead clearance and terrain noise amplitude. Each module also emits the
 route waypoints that the reward and the `waypoint_command` observation follow, so the
@@ -202,8 +297,16 @@ return from `velocity_tracking` earned while leaning forward on one foot. The fi
   ahead of the stance foot along the direction to the waypoint, negative when landing behind,
   nothing for a repeated hop on one foot; a skip that always leads with the same leg nets zero
   per stride), `feet_step_symmetry` (penalty per metre of difference between consecutive left
-  and right step lengths, so a gallop or limp pays on every step) and `feet_slide` (planar
-  speed of feet in contact). Steps used to be measured on the torso heading, and `flat_0.0.9`
+  and right step lengths, so a gallop or limp pays on every step), `feet_slide` (planar
+  speed of feet in contact) and `feet_stumble` (−1 per step on which a foot or shin presses
+  on a terrain face steeper than 60°, such as a rubble block's side; never on flat ground)
+  and `feet_edge` (−0.5 per foot per step whose support centre, the mean of its ground
+  contacts, is within 5 cm of a drop deeper than 5 cm: a block-top edge, stair nose, gap or
+  beam side; found by sampling the ground at eight points around that centre, so a step up
+  beside the foot or a seam between flush platforms does not count). On the shallowest
+  Procedural stairs (0.32 m treads) that is the 16% of each tread before its drop; a flat
+  sole is judged by its middle, so a toe resting on a stair nose is not penalised.
+  Steps used to be measured on the torso heading, and `flat_0.0.9`
   learned to exploit that: it galloped with the left foot leading 0.56 m and the right foot
   catching up 0.19 m behind, torso turned 33° so the catch-up step projected to about zero.
   `flat_0.0.10` (resumed from 0.0.9 with the travel-direction steps and the mirror loss)
@@ -331,11 +434,11 @@ vertical plane along the robot's heading, so lateral components flip, roll and y
 left and right joints swap with the sign their axes imply, and the height scan swaps its
 lateral columns.
 
-| `--symmetry` | What it does | Evidence |
-|---|---|---|
-| `loss` | Adds `--symmetry-coef` (1.0) x MSE between the policy mean at each mirrored state and the mirrored mean at the original state | Yu, Turk & Liu 2018 (asymmetric gaits without it); Abdolhosseini et al. 2019 (the most consistent of four methods); van Marum et al. 2024 (Digit) |
-| `augment` | Trains every minibatch on its mirrored copy too, with the original advantages, returns and old log-probabilities, and averages each action's log std with its mirror partner's after every optimizer step | Mittal et al. 2024 (fastest PPO convergence, from a near-symmetric policy) |
-| `both` (default) / `none` | Both mechanisms, or plain PPO | |
+| `--symmetry`              | What it does                                                                                                                                                                                              | Evidence                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `loss`                    | Adds `--symmetry-coef` (1.0) x MSE between the policy mean at each mirrored state and the mirrored mean at the original state                                                                             | Yu, Turk & Liu 2018 (asymmetric gaits without it); Abdolhosseini et al. 2019 (the most consistent of four methods); van Marum et al. 2024 (Digit) |
+| `augment`                 | Trains every minibatch on its mirrored copy too, with the original advantages, returns and old log-probabilities, and averages each action's log std with its mirror partner's after every optimizer step | Mittal et al. 2024 (fastest PPO convergence, from a near-symmetric policy)                                                                        |
+| `both` (default) / `none` | Both mechanisms, or plain PPO                                                                                                                                                                             |                                                                                                                                                   |
 
 The mirror loss works from any policy, including an asymmetric one being resumed.
 Augmentation only teaches much once the policy is close to symmetric: a mirrored sample counts
@@ -374,10 +477,10 @@ Difficulty `d` in [0, 1] changes the Rough course like this (means over 20 seeds
 along the route):
 
 | `d` | Course | Hills / pits | Mean / p95 slope | Bumps per 10 m | Rubble on route per 10 m | Tallest block step |
-|---|---|---|---|---|---|---|
-| 0 | 16 m | ±0.03 m | 1° / 2° | 3.8 | 0 | — |
-| 0.5 | 20 m | ±0.07 m | 4° / 7° | 4.6 | 2.2 | 0.23 m |
-| 1 | 25 m | ±0.11 m | 8° / 16° | 5.7 | 4.9 | 0.44 m |
+| --- | ------ | ------------ | ---------------- | -------------- | ------------------------ | ------------------ |
+| 0   | 16 m   | ±0.03 m      | 1° / 2°          | 3.8            | 0                        | —                  |
+| 0.5 | 20 m   | ±0.07 m      | 4° / 7°          | 4.6            | 2.2                      | 0.23 m             |
+| 1   | 25 m   | ±0.11 m      | 8° / 16°         | 5.7            | 4.9                      | 0.44 m             |
 
 - **Length**: `course_length` 16 m plus `course_length_growth` 9 m × `d`, the same pattern
   as Flat. Waypoints stay 2.5 m apart; lateral offsets of up to ±`d` m make the walked path
@@ -395,12 +498,18 @@ along the route):
 A curriculum level change rebuilds the course at the next reset, even between the
 5-reset resample interval.
 
-`Rough` samples independent waypoint speed commands from `[0.5 + d, 2.0 + d]` m/s on each
-reset, so difficulty also raises the requested speed. The current command is included in the
+`Rough` samples independent waypoint speed commands from `[0.3, 1.2]` m/s on each reset,
+whatever the difficulty, and tracks them with `velocity_tracking_sigma=0.5`. `rough_0.0.1`
+sampled `[0.5 + d, 1.25 + d]` with sigma 1: every command was faster than the ~0.9 m/s it
+could walk, so it learned to ignore the command and walked 0.85-0.95 m/s whether told 0.5 or
+1.75. The current command is included in the
 policy observation and a planar velocity-tracking reward trains speed and direction matching.
 Progress rewards are capped and velocity tracking favors matching the command; neither
 physically clamps actual velocity. The episode limit is 60 seconds, enough for the 16 m
 starting course at the lowest requested speed. Friction/mass randomization remains enabled.
+Every terrain geom has contact `priority="1"` above the robot's 0, so a contact's friction
+comes from the terrain alone. With equal priorities MuJoCo takes the larger of the two, and
+the feet's 1.0 hid every slippery ground draw, ice section and 0.6 metal ramp below it.
 This preset has 116 observation values, matching the current `Flat` preset;
 legacy 112-input rough checkpoints cannot be resumed directly.
 
@@ -435,7 +544,10 @@ smaller so standing still or rushing is not the intended objective. These weight
 are experimental; judge them using completion and success, not old reward totals.
 
 Height and tilt violations have a 20-step (0.3-second) recovery window. Torso
-clearance may drop to 0.6 m for the humanoid before the height counter starts.
+clearance may drop to 0.71 m for the humanoid (0.95 m × `bad_height_scale` 0.75) before
+the height counter starts. Hands on a 0.45 m climb or 0.5 m hurdle need the torso at
+about 1.0 m (shoulder 0.06 m above the torso, arm reach ~0.59 m), and the `d` = 1 tunnel
+crouch target is about 0.87 m, so none of them forces the torso below that line.
 Pit and boundary checks remain active. This is not a fully contact-aware climbing
 detector: prolonged low climbing/crouching poses can still terminate. Timeouts now
 also update curriculum difficulty, and stall detection uses `stall_distance`.
@@ -529,6 +641,7 @@ Rewrite those from the training log, which was always correct:
 python scripts/repair_state.py <run> --dry-run
 python scripts/repair_state.py <run>
 ```
+
 `run_config.json` records the task configuration and CLI settings for comparison.
 
 For follow-up experiments, first compare completion on the fixed evaluation set.

@@ -14,8 +14,12 @@ from gymnasium.spaces import Box
 from . import mdp, symmetry
 from .env_cfg import ParkourEnvCfg, TerrainCfg
 from .robots import get_robot
-from .scene import build_scene_xml, default_build_dir
+from .scene import SCAN_CLIPPED_RGBA, SCAN_MARKER_RGBA, build_scene_xml, default_build_dir
 from .terrain import build_terrain
+
+SUPPORT_NORMAL_Z = 0.5
+"""A terrain contact whose normal has |z| above this supports weight (ground, a block top); at or
+below it the contact is on a face steeper than 60 degrees (a block side, a stair riser)."""
 
 DEFAULT_CAMERA_CONFIG = {
     "trackbodyid": 1,
@@ -117,6 +121,10 @@ class ParkourEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, self.data)
+        self._ceiling_geom_ids = frozenset(
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, box.name)
+            for box in self.terrain.boxes if box.ceiling
+        )
 
         self._nominal = {
             "geom_friction": self.model.geom_friction.copy(),
@@ -139,6 +147,16 @@ class ParkourEnv(gym.Env):
             {g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] == body_id}
             for body_id in self._foot_body_ids
         ]
+        shin_body_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in self.robot.shin_bodies
+        ]
+        if any(body_id < 0 for body_id in shin_body_ids):
+            raise RuntimeError("robot shin bodies not found in the scene")
+        self._leg_geom_ids = set().union(*self._foot_geom_ids, *(
+            {g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] == body_id}
+            for body_id in shin_body_ids
+        ))
         self._ctrl_range = self.model.actuator_ctrlrange.copy()
         self._joint_range = self.model.jnt_range.copy()
         # Actuated hinge joints: qpos/qvel addresses, target limits and PD gains per actuator.
@@ -224,23 +242,34 @@ class ParkourEnv(gym.Env):
         self._overhead_buffer = deque(maxlen=max(1, self.cfg.observation.exteroceptive_delay + 1))
         self._obs_history = deque(maxlen=max(1, self.cfg.observation.history_length))
 
-        if self._mujoco_renderer is not None:
-            self._mujoco_renderer.close()
-            self._mujoco_renderer = None
-            self._viewer_camera_set = False
+        self._rebind_renderer()
+
+    def _rebind_renderer(self) -> None:
+        """Point an open renderer at the rebuilt model instead of closing it.
+
+        Closing destroys the viewer window and terminates GLFW, and the next render initialises
+        both again, which on macOS could leave the screen black after a reset (Procedural
+        rebuilds on every one). The window, its camera and the viewer options survive; only
+        the scene and the GPU context are made again for the new model.
+        """
+        renderer = self._mujoco_renderer
+        if renderer is None:
+            return
+        renderer.model, renderer.data = self.model, self.data
+        for viewer in renderer._viewers.values():
+            viewer.make_context_current()
+            viewer.con.free()
+            viewer.model, viewer.data = self.model, self.data
+            viewer.scn = mujoco.MjvScene(self.model, viewer.scn.maxgeom)
+            viewer.con = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
+            viewer._set_mujoco_buffer()
 
     def _resolve_waypoints(self, waypoints: np.ndarray) -> np.ndarray:
         waypoints = np.asarray(waypoints, dtype=np.float64).reshape(-1, 3).copy()
         if not self.terrain.resolve_waypoint_z:
             return waypoints
-        direction = np.array([0.0, 0.0, -1.0])
-        geom_id = np.zeros(1, dtype=np.int32)
         for i, point in enumerate(waypoints):
-            start = np.array([point[0], point[1], 6.0])
-            dist = mujoco.mj_ray(
-                self.model, self.data, start, direction, mdp.observations.TERRAIN_RAY_MASK,
-                1, -1, geom_id,
-            )
+            dist = mdp.ground_ray(self.model, self.data, (point[0], point[1], 6.0), self._ceiling_geom_ids)
             waypoints[i, 2] = (6.0 - dist) + point[2] if dist >= 0 else point[2]
         return waypoints
 
@@ -375,6 +404,57 @@ class ParkourEnv(gym.Env):
                 elif contact.geom2 in geom_ids and contact.geom1 not in geom_ids:
                     contacts[index] = True
         return contacts
+
+    def _stumbling(self) -> bool:
+        """Whether a foot or shin is pressing on a near-vertical terrain face."""
+        groups = self.model.geom_group
+        for contact in self.data.contact[: self.data.ncon]:
+            if abs(contact.frame[2]) > SUPPORT_NORMAL_Z:
+                continue
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if (g1 in self._leg_geom_ids and groups[g2] == 1) or (g2 in self._leg_geom_ids and groups[g1] == 1):
+                return True
+        return False
+
+    EDGE_SAMPLE_DIRECTIONS = np.stack(
+        [np.cos(np.arange(8) * np.pi / 4), np.sin(np.arange(8) * np.pi / 4)], axis=1,
+    )
+
+    def _feet_at_edge(self) -> int:
+        """Number of feet whose support centre is within ``feet_edge_margin`` of a drop deeper than
+        ``feet_edge_drop``.
+
+        The support centre is the mean of the foot's supporting contact points. For the
+        humanoid's sphere foot that is its one contact point; for a flat sole touching at heel and
+        toe it is mid-sole, so a toe over a stair nose with the foot well placed does not count,
+        while a sole centred near the nose has about half its length unsupported, the "more
+        than half the sole unsupported" rule of humanoid stair work. The ground is sampled at
+        eight points ``feet_edge_margin`` around the centre; a step up beside the foot, a seam
+        between flush platforms or a gentle slope is not an edge.
+        """
+        reward = self.cfg.reward
+        groups = self.model.geom_group
+        count = 0
+        for geom_ids in self._foot_geom_ids:
+            points = [
+                contact.pos.copy()
+                for contact in self.data.contact[: self.data.ncon]
+                if abs(contact.frame[2]) > SUPPORT_NORMAL_Z and (
+                    (contact.geom1 in geom_ids and groups[contact.geom2] == 1)
+                    or (contact.geom2 in geom_ids and groups[contact.geom1] == 1)
+                )
+            ]
+            if not points:
+                continue
+            centre = np.mean(points, axis=0)[:2]
+            surface = max(float(point[2]) for point in points)
+            samples = centre + reward.feet_edge_margin * self.EDGE_SAMPLE_DIRECTIONS
+            if any(
+                self._terrain_height_below(xy, surface + 1.0) < surface - reward.feet_edge_drop
+                for xy in samples
+            ):
+                count += 1
+        return count
 
     def _update_gait_state(self, travel_direction: np.ndarray | None = None) -> tuple[float, float, float, float]:
         """Advance per-foot swing/stance clocks; return (single-stance mode time, step-ahead, slide speed,
@@ -621,12 +701,7 @@ class ParkourEnv(gym.Env):
         return False
 
     def _terrain_height_below(self, xy: np.ndarray, from_z: float) -> float:
-        geom_id = np.zeros(1, dtype=np.int32)
-        start = np.array([xy[0], xy[1], from_z])
-        dist = mujoco.mj_ray(
-            self.model, self.data, start, np.array([0.0, 0.0, -1.0]),
-            mdp.observations.TERRAIN_RAY_MASK, 1, -1, geom_id,
-        )
+        dist = mdp.ground_ray(self.model, self.data, (xy[0], xy[1], from_z), self._ceiling_geom_ids)
         return from_z - dist if dist >= 0 else -np.inf
 
     def _evaluate(self, action, progress, reached, *, active_target=None, target_speed=None,
@@ -720,6 +795,9 @@ class ParkourEnv(gym.Env):
             feet_step_ahead=step_ahead,
             feet_step_asymmetry=step_asymmetry,
             feet_slide_speed=slide_speed,
+            stumbling=bool(cfg.reward.feet_stumble) and self._stumbling(),
+            feet_at_edge=self._feet_at_edge() if cfg.reward.feet_edge else 0,
+            ceiling_overlap=self._ceiling_overlap() if cfg.reward.ceiling_clearance else 0.0,
             supported=not (low_height or tilted),
         )
         self._prev_action = action.copy()
@@ -728,39 +806,79 @@ class ParkourEnv(gym.Env):
             reason = "goal"
         return float(sum(terms.values())), terms, terminated, reason
 
-    def _height_reward_error(self, surface_z: float) -> float:
-        if not self.cfg.reward.base_height or not np.isfinite(surface_z):
-            return 0.0
+    def _support_surface_z(self) -> float | None:
+        """Height of the highest terrain contact holding the robot up, or None when airborne.
+
+        Ceilings are not support: an arm pressing on a tunnel bar's underside made the posture
+        reward read the floor at bar height and ask the robot to stand up into it.
+        """
         groups = self.model.geom_group
-        support_contacts = [
-            contact
+        heights = [
+            float(contact.pos[2])
             for contact in self.data.contact
             if contact.geom1 >= 0 and contact.geom2 >= 0
             and {int(groups[contact.geom1]), int(groups[contact.geom2])} == {0, 1}
-            and contact.dist <= 0.0 and abs(contact.frame[2]) > 0.5
+            and contact.geom1 not in self._ceiling_geom_ids and contact.geom2 not in self._ceiling_geom_ids
+            and contact.dist <= 0.0 and abs(contact.frame[2]) > SUPPORT_NORMAL_Z
             and contact.pos[2] < self.root_pos[2]
         ]
-        if not support_contacts:
-            return 0.0
-        surface_z = max(float(contact.pos[2]) for contact in support_contacts)
-        height_above_terrain = self.root_pos[2] - surface_z
+        return max(heights) if heights else None
+
+    def _ceiling_z(self, surface_z: float) -> float | None:
+        """World height of the lowest ceiling the upward rays see from ``surface_z``, or None."""
         observation = self.cfg.observation
         origin = self.root_pos.copy()
         origin[2] = surface_z + observation.overhead_origin_height
         depths, _ = mdp.overhead_scan(
             self.model, self.data, origin, mdp.yaw_from_quat(self.root_quat), observation,
         )
+        if not len(depths) or np.min(depths) >= observation.overhead_max_depth:
+            return None
+        return float(origin[2] + np.min(depths))
+
+    def _robot_top_z(self) -> float:
+        """Highest point of the robot: exact for spheres and capsules, bounding sphere otherwise.
+
+        A capsule's bounding sphere reaches its half-length above its centre whatever its
+        angle, which put a level forearm ~0.1 m higher than it is.
+        """
+        robot = np.flatnonzero(self.model.geom_group == 0)
+        size = self.model.geom_size[robot]
+        top = self.data.geom_xpos[robot, 2] + self.model.geom_rbound[robot]
+        capsule = self.model.geom_type[robot] == mujoco.mjtGeom.mjGEOM_CAPSULE
+        axis_z = np.abs(self.data.geom_xmat[robot, 8])  # world z of each geom's local z axis
+        top = np.where(capsule, self.data.geom_xpos[robot, 2] + size[:, 0] + size[:, 1] * axis_z, top)
+        sphere = self.model.geom_type[robot] == mujoco.mjtGeom.mjGEOM_SPHERE
+        top = np.where(sphere, self.data.geom_xpos[robot, 2] + size[:, 0], top)
+        return float(np.max(top))
+
+    def _height_reward_error(self, surface_z: float) -> float:
+        if not self.cfg.reward.base_height or not np.isfinite(surface_z):
+            return 0.0
+        surface_z = self._support_surface_z()
+        if surface_z is None:
+            return 0.0
+        height_above_terrain = self.root_pos[2] - surface_z
         target_height = self.cfg.nominal_base_height
-        if len(depths) and np.min(depths) < observation.overhead_max_depth:
-            robot_geoms = groups == 0
-            top_above_root = float(np.max(
-                self.data.geom_xpos[robot_geoms, 2] + self.model.geom_rbound[robot_geoms]
-            ) - self.root_pos[2])
-            clearance = observation.overhead_origin_height + float(np.min(depths))
+        ceiling = self._ceiling_z(surface_z)
+        if ceiling is not None:
+            top_above_root = self._robot_top_z() - self.root_pos[2]
             target_height = min(target_height, max(
-                0.0, clearance - top_above_root - self.cfg.reward.base_height_clearance_margin,
+                0.0, ceiling - surface_z - top_above_root - self.cfg.reward.base_height_clearance_margin,
             ))
         return height_above_terrain - target_height
+
+    def _ceiling_overlap(self) -> float:
+        """Metres the robot's top is above the lowest ceiling the upward rays see, less the margin."""
+        surface_z = self._support_surface_z()
+        if surface_z is None:
+            surface_z = self._terrain_height_below(self.root_pos[:2], self.root_pos[2] + 0.1)
+            if not np.isfinite(surface_z):
+                return 0.0
+        ceiling = self._ceiling_z(surface_z)
+        if ceiling is None:
+            return 0.0
+        return max(0.0, self._robot_top_z() - (ceiling - self.cfg.reward.base_height_clearance_margin))
 
     def _compute_observation(self) -> np.ndarray:
         cfg = self.cfg.observation
@@ -847,7 +965,7 @@ class ParkourEnv(gym.Env):
         yaw = mdp.yaw_from_quat(self.root_quat)
         origin = self.root_pos.copy()
         origin[2] += 0.1
-        depths, hits = mdp.height_scan(self.model, self.data, origin, yaw, cfg)
+        depths, hits = mdp.height_scan(self.model, self.data, origin, yaw, cfg, self._ceiling_geom_ids)
         self._scan_buffer.append(depths)
         delayed = self._scan_buffer[0]
         relative = np.clip(
@@ -855,10 +973,19 @@ class ParkourEnv(gym.Env):
         )
         if cfg.noise_height_scan:
             relative = relative + self.np_random.normal(0, cfg.noise_height_scan, relative.shape)
-        for geom_id, hit in zip(self._scan_marker_ids, hits):
-            if geom_id >= 0:
-                self.model.geom_pos[geom_id] = hit
-                self.data.geom_xpos[geom_id] = hit
+        if self._scan_marker_ids:
+            # Draw each dot where the policy reads the ground, not where the ray hit: a ray off the
+            # course falls into the pit but reads scan_clip[0], so its dot sits that far down and
+            # turns magenta.
+            current = self.cfg.nominal_base_height - depths
+            seen = np.clip(current, cfg.scan_clip[0], cfg.scan_clip[1])
+            shown = hits.copy()
+            shown[:, 2] = origin[2] - (self.cfg.nominal_base_height - seen)
+            for geom_id, position, clipped in zip(self._scan_marker_ids, shown, seen != current):
+                if geom_id >= 0:
+                    self.model.geom_pos[geom_id] = position
+                    self.data.geom_xpos[geom_id] = position
+                    self.model.geom_rgba[geom_id] = SCAN_CLIPPED_RGBA if clipped else SCAN_MARKER_RGBA
         return relative
 
     def _overhead_scan_obs(self) -> np.ndarray:

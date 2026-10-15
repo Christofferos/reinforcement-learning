@@ -25,7 +25,7 @@ class EventCfg:
     """Added to ``push_velocity`` at maximum terrain difficulty."""
 
     randomize_friction: bool = False
-    friction_range: tuple[float, float] = (0.5, 1.5)
+    friction_range: tuple[float, float] = (0.9, 1.1)
     randomize_mass: bool = False
     mass_scale_range: tuple[float, float] = (0.9, 1.1)
     randomize_gear: bool = False

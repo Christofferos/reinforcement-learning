@@ -83,32 +83,51 @@ def projected_gravity(quat: np.ndarray) -> np.ndarray:
     return quat_to_mat(quat).T @ np.array([0.0, 0.0, -1.0])
 
 
+def ground_ray(model, data, start, ceilings: frozenset[int] = frozenset()) -> float:
+    """Distance straight down from ``start`` to the terrain, or -1 on a miss.
+
+    A ray that meets one of the ``ceilings`` geom ids (from above, or from inside, where
+    ``mj_ray`` reports its underside) continues from just below it, so a tunnel bar ahead of a
+    standing robot reads as the floor beneath it rather than a wall. Ceilings must be boxes.
+    """
+    origin = np.array(start, dtype=np.float64)
+    direction = np.array([0.0, 0.0, -1.0])
+    geom_id = np.zeros(1, dtype=np.int32)
+    travelled = 0.0
+    while True:
+        dist = mujoco.mj_ray(model, data, origin, direction, TERRAIN_RAY_MASK, 1, -1, geom_id)
+        geom = int(geom_id[0])
+        if dist < 0 or geom not in ceilings:
+            return travelled + dist if dist >= 0 else -1.0
+        half_height = float(np.abs(data.geom_xmat[geom].reshape(3, 3)[2]) @ model.geom_size[geom])
+        step = origin[2] - (data.geom_xpos[geom, 2] - half_height) + 1e-6
+        origin[2] -= step
+        travelled += step
+
+
 def height_scan(
     model,
     data,
     origin: np.ndarray,
     yaw: float,
     cfg: ObservationCfg,
+    ceilings: frozenset[int] = frozenset(),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Ray-cast a yaw-aligned grid downwards.
 
     Returns ``(relative_heights, hit_points)`` where ``relative_heights`` is the base
     height above the terrain sample and ``hit_points`` are world-space hits (for debug
-    markers).  Misses are clamped to ``scan_max_depth``.
+    markers).  Misses are clamped to ``scan_max_depth``. Rays pass through ``ceilings``.
     """
     cos_y, sin_y = np.cos(yaw), np.sin(yaw)
     points = cfg.scan_points
     world_x = origin[0] + cos_y * points[:, 0] - sin_y * points[:, 1]
     world_y = origin[1] + sin_y * points[:, 0] + cos_y * points[:, 1]
 
-    direction = np.array([0.0, 0.0, -1.0])
-    geom_id = np.zeros(1, dtype=np.int32)
     heights = np.empty(len(points))
     hits = np.empty((len(points), 3))
-    start = np.empty(3)
     for i in range(len(points)):
-        start[:] = (world_x[i], world_y[i], origin[2])
-        dist = mujoco.mj_ray(model, data, start, direction, TERRAIN_RAY_MASK, 1, -1, geom_id)
+        dist = ground_ray(model, data, (world_x[i], world_y[i], origin[2]), ceilings)
         if dist < 0 or dist > cfg.scan_max_depth:
             dist = cfg.scan_max_depth
         heights[i] = dist

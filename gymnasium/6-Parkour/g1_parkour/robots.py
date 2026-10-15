@@ -36,6 +36,8 @@ class RobotSpec:
     healthy_height_range: tuple[float, float]
     """Allowed root height relative to the terrain surface below the robot."""
     foot_bodies: tuple[str, ...]
+    shin_bodies: tuple[str, ...] = ()
+    """Lower-leg bodies whose contacts with a terrain face count as a stumble, like the feet's."""
     action_scale: float = 0.4
     includes: tuple[str, ...] = field(default_factory=tuple)
     """Extra MJCF files to ``<include>`` (used by the Menagerie-based G1 spec)."""
@@ -181,6 +183,7 @@ HUMANOID = RobotSpec(
     spawn_height=1.4,
     healthy_height_range=(0.95, 2.2),
     foot_bodies=("left_foot", "right_foot"),
+    shin_bodies=("left_shin", "right_shin"),
     # Flexed hips/knees chosen so the whole-body CoM sits over the feet (the model has no
     # ankles, so balance must come from the hips); also keeps qpos inside the knee range.
     default_joint_pos={

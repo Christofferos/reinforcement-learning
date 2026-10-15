@@ -26,6 +26,11 @@ class RewardCfg:
     base_height: float = 0.0
     base_height_clearance_margin: float = 0.05
     """Safety gap above the robot when lowering its posture target for overhead clearance."""
+    ceiling_clearance: float = 0.0
+    """Penalty per metre per step that the robot's top is above the lowest ceiling the upward
+    rays see, less ``base_height_clearance_margin``. Zero without a ceiling. Linear, so it keeps
+    pulling the robot down all the way, where the quadratic ``base_height`` target charged only
+    0.072 per step for standing 0.38 m too tall under a d=1 tunnel bar."""
     lateral_velocity: float = -0.1
     angular_velocity: float = -0.02
     action_rate: float = -0.05
@@ -56,6 +61,17 @@ class RewardCfg:
     gradient toward even steps. Only paid when a non-zero speed is commanded."""
     feet_slide: float = 0.0
     """Penalty on the planar speed of feet that are in contact with the ground."""
+    feet_stumble: float = 0.0
+    """Penalty per control step on which a foot or shin presses on a near-vertical terrain face,
+    such as the side of a rubble block or a stair riser: the immediate cost of a trip, which
+    otherwise only shows up later as a fall. Zero on flat ground and gentle slopes."""
+    feet_edge: float = 0.0
+    """Penalty per foot per control step standing within ``feet_edge_margin`` of a drop deeper
+    than ``feet_edge_drop``: the edge of a block top, a stair nose, a gap or a stepping stone.
+    A sphere foot there rolls off. Extreme Parkour's clearance term (Cheng et al. 2023), with
+    the edges found by sampling the ground around the foot instead of a precomputed mask."""
+    feet_edge_margin: float = 0.05
+    feet_edge_drop: float = 0.05
     gate_on_support: bool = True
     """Pay ``progress`` and ``velocity_tracking`` only while the base is in a healthy pose
     (height and tilt inside the termination band), so a slow fall earns nothing."""
@@ -84,6 +100,9 @@ def terms(
     feet_step_ahead: float = 0.0,
     feet_step_asymmetry: float = 0.0,
     feet_slide_speed: float = 0.0,
+    stumbling: bool = False,
+    feet_at_edge: int = 0,
+    ceiling_overlap: float = 0.0,
     supported: bool = True,
 ) -> dict[str, float]:
     progress_limit = cfg.clip_progress if target_speed is None else min(cfg.clip_progress, target_speed)
@@ -100,6 +119,9 @@ def terms(
         "feet_step_ahead": cfg.feet_step_ahead * feet_step_ahead if moving else 0.0,
         "feet_step_symmetry": cfg.feet_step_symmetry * feet_step_asymmetry if moving else 0.0,
         "feet_slide": cfg.feet_slide * feet_slide_speed,
+        "feet_stumble": cfg.feet_stumble * float(stumbling),
+        "feet_edge": cfg.feet_edge * feet_at_edge,
+        "ceiling_clearance": cfg.ceiling_clearance * ceiling_overlap,
         "waypoint_bonus": cfg.waypoint_bonus * waypoints_reached,
         "goal_bonus": cfg.goal_bonus * float(reached_goal),
         "heading": cfg.heading * heading_alignment,

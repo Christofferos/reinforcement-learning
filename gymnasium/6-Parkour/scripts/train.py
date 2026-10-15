@@ -86,10 +86,52 @@ def state_path(checkpoint) -> Path:
     return Path(checkpoint).with_suffix(".state.json")
 
 
-def restore_difficulties(env, checkpoint, num_envs: int) -> list[float] | None:
-    """Put each worker back at the difficulty saved with ``checkpoint``; None if no state file."""
+def adopt_constant_inputs(model, normalizer, threshold: float = 1e-4) -> list[int]:
+    """Prepare observation inputs a resumed checkpoint only ever saw constant; returns their indices.
+
+    VecNormalize divides by each input's running std. The upward scan read a constant 2 m
+    through all of Flat and Rough (variance ~1e-12 after 236M samples), so its first tunnel
+    reading normalises to ~-13,000 std, clipped to -10, and statistics weighted by that count
+    take tens of millions of steps to adapt. Its first-layer weights never trained either, so
+    the clipped values reached the network through random weights. Such inputs get unit
+    variance around their old mean (the constant still reads 0) and zero first-layer weights
+    in the actor and critic: both behave as before until training learns to use them.
+    The threshold sits between rough_0.0.3's constant inputs (up to 7.3e-6, where the last
+    upward ray's rare pushes and resets left a trace) and its least varying real one (5.6e-3).
+    """
+    rms = normalizer.obs_rms
+    indices = np.flatnonzero(rms.var < threshold)
+    if not len(indices):
+        return []
+    rms.var[indices] = 1.0
+    import torch as th
+
+    extractor = model.policy.mlp_extractor
+    with th.no_grad():
+        for net in (extractor.policy_net, extractor.value_net):
+            net[0].weight[:, indices] = 0.0
+    return indices.tolist()
+
+
+def checkpoint_task(checkpoint) -> str | None:
+    """Task the run that saved ``checkpoint`` trained on, from its ``run_config.json``; None if unknown."""
+    path = Path(checkpoint).parent / "run_config.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get("arguments", {}).get("task")
+
+
+def restore_difficulties(env, checkpoint, num_envs: int, task: str | None = None) -> list[float] | None:
+    """Put each worker back at the difficulty saved with ``checkpoint``.
+
+    Returns None, leaving the task's initial difficulty, if there is no state file or the
+    checkpoint was trained on a different ``task``: Flat's difficulty 1.0 restored into Rough
+    started rough_0.0.1 on full-height rubble.
+    """
     path = state_path(checkpoint)
     if not path.exists():
+        return None
+    if task is not None and checkpoint_task(checkpoint) not in (None, task):
         return None
     difficulties = json.loads(path.read_text())["difficulties"]
     if len(difficulties) != num_envs:
@@ -242,6 +284,9 @@ def main() -> None:
                         help="PPO hidden layer widths for a fresh policy (default 256 256); cannot be changed on resume")
     parser.add_argument("--log-std-init", type=float, default=-1.0,
                         help="initial log standard deviation of a fresh PPO policy (exp(-1) ~ 0.37 of the action range)")
+    parser.add_argument("--max-std", type=float, default=None,
+                        help="ceiling on the PPO action std, also applied to a resumed policy before its first "
+                             "rollout (actions are clipped to [-1, 1]; rough_0.0.2's std drifted to 2.32 without one)")
     parser.add_argument("--symmetry", choices=("loss", "augment", "both", "none"), default="both",
                         help="left/right mirror symmetry for PPO: a mirror loss on the policy mean (loss), "
                              "mirrored minibatch copies with a mirror-symmetric action std (augment), "
@@ -314,6 +359,7 @@ def main() -> None:
         options = dict(learning_rate=args.learning_rate, gamma=args.gamma,
                        batch_size=args.batch_size, n_epochs=args.n_epochs, target_kl=args.target_kl,
                        ent_coef=args.ent_coef, symmetry=args.symmetry, symmetry_coef=args.symmetry_coef,
+                       max_std=args.max_std,
                        mirror=(eval_env.observation_mirror(), eval_env.action_mirror())
                        if args.symmetry != "none" else None)
         if not args.resume:
@@ -326,11 +372,18 @@ def main() -> None:
         model.ep_info_buffer = deque(maxlen=model._stats_window_size)
         model.ep_success_buffer = deque(maxlen=model._stats_window_size)
         print(f"resumed from {args.resume}")
-        difficulties = restore_difficulties(env, args.resume, args.num_envs)
+        difficulties = restore_difficulties(env, args.resume, args.num_envs, task=args.task)
+        resumed_task = checkpoint_task(args.resume)
         if difficulties is not None:
             print(f"restored terrain difficulties: {difficulties}")
+        elif resumed_task not in (None, args.task):
+            print(f"checkpoint trained on {resumed_task}; starting {args.task} at its initial difficulty")
         else:
             print("no difficulty state in this older checkpoint; using the task's initial difficulty")
+        if isinstance(env, VecNormalize):
+            adopted = adopt_constant_inputs(model, env)
+            if adopted:
+                print(f"observation inputs {adopted} were constant in the checkpoint: unit variance, zero weights")
     else:
         model = algo("MlpPolicy", env, verbose=1, seed=args.seed, tensorboard_log=str(log_dir), **options)
     model.set_logger(configure(str(run_log_dir), ["stdout", "csv", "json", "tensorboard"]))

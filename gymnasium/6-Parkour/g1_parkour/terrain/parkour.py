@@ -39,12 +39,13 @@ def _lerp(low: float, high: float, t: float) -> float:
     return low + (high - low) * t
 
 
-def _platform(name: str, x0: float, x1: float, y: float, z: float, width: float, **kw) -> Box:
+def _platform(name: str, x0: float, x1: float, y: float, z: float, width: float,
+              thickness: float = PLATFORM_THICKNESS, **kw) -> Box:
     kw.setdefault("material", "Concrete")
     return Box(
         name=name,
-        pos=((x0 + x1) / 2.0, y, z - PLATFORM_THICKNESS / 2.0),
-        size=((x1 - x0) / 2.0, width / 2.0, PLATFORM_THICKNESS / 2.0),
+        pos=((x0 + x1) / 2.0, y, z - thickness / 2.0),
+        size=((x1 - x0) / 2.0, width / 2.0, thickness / 2.0),
         **kw,
     )
 
@@ -62,7 +63,10 @@ def mod_run(rng, d, c: Cursor) -> ModuleOutput:
 
 
 def mod_gap(rng, d, c: Cursor) -> ModuleOutput:
-    gap = _lerp(0.45, 1.5, d) * rng.uniform(0.85, 1.15)
+    # Up to about the longest stride the humanoid has: legs ~0.8 m, spread ~35 degrees each way
+    # from the hip, is ~0.9 m foot to foot, a 0.8 m gap with each foot 5 cm off the edges
+    # (``feet_edge``). It reached 1.73 m, a running long jump for a walker stepping 0.3-0.45 m.
+    gap = _lerp(0.3, 0.8, d) * rng.uniform(0.9, 1.1)
     landing = rng.uniform(1.6, 2.6)
     drop = rng.uniform(-0.15, 0.15) * d
     x0 = c.x + gap
@@ -76,13 +80,22 @@ def mod_gap(rng, d, c: Cursor) -> ModuleOutput:
 
 
 def mod_stepping_stones(rng, d, c: Cursor) -> ModuleOutput:
+    """Stones a step apart: the same edge-to-edge gap before the first stone, between stones
+    and after the last, from a 0.1 m crack to 0.3 m. With 5 cm kept off each edge
+    (``feet_edge``) the longest step needed is 0.4 m, a long step rather than a jump. Stones
+    used to sit at even centre spacing from the previous section with the landing reaching
+    0.6 m back, so at d=1 the first gap was 1.07 m and at d=0 the last stone overlapped it.
+    """
     count = int(_lerp(3, 6, d))
-    spacing = _lerp(0.85, 1.35, d)
-    half = _lerp(0.45, 0.28, d)
+    half = _lerp(0.4, 0.25, d)
+    gap = _lerp(0.1, 0.3, d)
+    # Neighbours are at most 0.4 m apart sideways, so 0.5 m stones still overlap by 0.1 m.
+    lateral = 0.2 * d
     boxes, waypoints = [], []
+    near_edge = c.x + gap
     for i in range(count):
-        x = c.x + spacing * (i + 1)
-        y = c.y + rng.uniform(-0.5, 0.5) * d
+        x = near_edge + half
+        y = c.y + rng.uniform(-lateral, lateral)
         z = c.z + rng.uniform(-0.1, 0.1) * d
         boxes.append(
             Box(
@@ -94,17 +107,20 @@ def mod_stepping_stones(rng, d, c: Cursor) -> ModuleOutput:
             )
         )
         waypoints.append((x, y, z))
-    c.x += spacing * (count + 1)
-    landing = _platform(f"stone_land_{c.index}", c.x - 0.6, c.x + 1.6, c.y, c.z, DEFAULT_WIDTH)
-    boxes.append(landing)
-    c.x += 1.6
+        near_edge = x + half + gap
+    boxes.append(_platform(f"stone_land_{c.index}", near_edge, near_edge + 1.6, c.y, c.z, DEFAULT_WIDTH))
+    c.x = near_edge + 1.6
     waypoints.append((c.x, c.y, c.z))
     return ModuleOutput(boxes, waypoints)
 
 
 def mod_hurdle(rng, d, c: Cursor) -> ModuleOutput:
     length = 4.0
-    height = _lerp(0.2, 0.65, d)
+    # Up to 0.5 m, 63% of the humanoid's 0.79 m hip height; 0.65 m was 82%. Grows with d², so
+    # the low curriculum levels stay near what the walker can step over: procedural_0.0.2
+    # passed 15/15 at 0.20 m and 3/15 at 0.24 m, and with linear growth every hurdle along a
+    # d=0.38 course was already 0.24-0.31 m.
+    height = 0.2 + 0.3 * d**2
     boxes = [_platform(f"hurdle_run_{c.index}", c.x, c.x + length, c.y, c.z, DEFAULT_WIDTH)]
     wall_x = c.x + length / 2.0
     boxes.append(
@@ -160,7 +176,10 @@ def mod_ramp(rng, d, c: Cursor) -> ModuleOutput:
     boxes = [
         Box(
             f"ramp_{c.index}",
-            pos=(cx, c.y, cz - PLATFORM_THICKNESS / 2.0 * np.cos(rad)),
+            # Centre the slab half its thickness below its top face along the face normal,
+            # (-sin, cos) in x-z. Offsetting z alone slid the face 0.2 * sin(angle) m along the
+            # slope, leaving a 14 cm deep notch where a 22-degree ramp met the platform before it.
+            pos=(cx + PLATFORM_THICKNESS / 2.0 * np.sin(rad), c.y, cz - PLATFORM_THICKNESS / 2.0 * np.cos(rad)),
             size=(length / 2.0 / np.cos(rad), DEFAULT_WIDTH / 2.0, PLATFORM_THICKNESS / 2.0),
             euler=(0.0, -angle, 0.0),
             material="Metal" if rng.random() < 0.3 else "Concrete",
@@ -176,7 +195,10 @@ def mod_ramp(rng, d, c: Cursor) -> ModuleOutput:
 
 def mod_beam(rng, d, c: Cursor) -> ModuleOutput:
     length = _lerp(2.5, 4.0, d)
-    width = _lerp(0.6, 0.28, d)
+    # 1.0 m at d=0, so Procedural's ±0.4 m ground scan stays on the beam and it reads like a
+    # walkway; the outer rays first hang over the pit near d=0.3 (0.8 m). It started at 0.6 m,
+    # where 18 of 45 rays were over the pit from the start and procedural_0.0.1 failed 17/17.
+    width = _lerp(1.0, 0.28, d)
     boxes = [
         _platform(f"beam_{c.index}", c.x, c.x + length, c.y, c.z, width, material="Wood"),
     ]
@@ -189,7 +211,8 @@ def mod_beam(rng, d, c: Cursor) -> ModuleOutput:
 
 def mod_tunnel(rng, d, c: Cursor) -> ModuleOutput:
     length = 3.5
-    clearance = _lerp(1.45, 1.05, d)
+    # 1.2 m at d=1, 0.33 m below the standing humanoid's head top (1.53 m); 1.05 m was 0.48 m.
+    clearance = _lerp(1.45, 1.2, d)
     boxes = [_platform(f"tunnel_run_{c.index}", c.x, c.x + length, c.y, c.z, DEFAULT_WIDTH)]
     bar_x = c.x + length / 2.0
     boxes.append(
@@ -198,6 +221,7 @@ def mod_tunnel(rng, d, c: Cursor) -> ModuleOutput:
             pos=(bar_x, c.y, c.z + clearance + 0.1),
             size=(0.12, DEFAULT_WIDTH / 2.0, 0.1),
             material="Wood",
+            ceiling=True,
         )
     )
     for side, sign in (("l", 1), ("r", -1)):
@@ -214,14 +238,20 @@ def mod_tunnel(rng, d, c: Cursor) -> ModuleOutput:
 
 
 def mod_climb(rng, d, c: Cursor) -> ModuleOutput:
-    rise = _lerp(0.3, 0.75, d)
-    gap = _lerp(0.2, 0.6, d)
-    x0 = c.x + gap
+    # The humanoid's knee is 0.43 m and its hip 0.79 m above the floor, and it has no hands:
+    # the old 0.75 m top was 95% of hip height. Now from Rough's tallest rubble step at d=0
+    # to about knee height. The riser starts where the floor ends, with no gap, so the robot
+    # can stand against it before stepping up; the block reaches down to the floor's
+    # underside, so above a 0.4 m rise no slot opens under the riser for a foot to slip into.
+    # Grows with d², like the hurdle: procedural_0.0.2 climbed 0.20 m every time, 0.24 m 10/15
+    # and 0.30 m 1/15.
+    rise = 0.15 + 0.3 * d**2
+    x0 = c.x
     length = rng.uniform(2.0, 3.0)
     boxes = [
         _platform(
             f"climb_{c.index}", x0, x0 + length, c.y, c.z + rise, DEFAULT_WIDTH,
-            rgba=(0.4, 0.7, 0.9, 1.0), material=None,
+            thickness=rise + PLATFORM_THICKNESS, rgba=(0.4, 0.7, 0.9, 1.0), material=None,
         )
     ]
     c.x = x0 + length
@@ -285,18 +315,21 @@ def make_parkour(
     rng: np.random.Generator,
     difficulty: float = 0.5,
     num_modules: int = 8,
+    num_modules_growth: int = 0,
     skills: tuple[str, ...] = DEFAULT_SKILLS,
     skill_weights: dict[str, float] | None = None,
     start_pad_length: float = 3.0,
     pit_depth: float = 4.0,
     ramp_difficulty: bool = True,
 ) -> TerrainSpec:
-    """Sample a parkour course by chaining ``num_modules`` random skill modules.
+    """Sample a parkour course by chaining random skill modules: ``num_modules`` at difficulty 0,
+    ``num_modules_growth`` more at difficulty 1, rounded to the nearest whole module.
 
     ``ramp_difficulty`` linearly grows the per-module difficulty from ``0.35 *
     difficulty`` at the start of the course to ``difficulty`` at the end.
     """
     difficulty = float(np.clip(difficulty, 0.0, 1.0))
+    num_modules += int(np.floor(num_modules_growth * difficulty + 0.5))
     unknown = set(skills) - set(MODULES)
     if unknown:
         raise KeyError(f"unknown parkour skills {sorted(unknown)}; available: {sorted(MODULES)}")

@@ -33,12 +33,22 @@ class SymmetricPPO(PPO):
     MODES = ("none", "loss", "augment", "both")
 
     def __init__(self, *args, symmetry: str = "none", symmetry_coef: float = 1.0,
-                 mirror: tuple[Mirror, Mirror] | None = None, **kwargs):
+                 mirror: tuple[Mirror, Mirror] | None = None, max_std: float | None = None, **kwargs):
+        if max_std is not None and not max_std > 0:
+            raise ValueError("max_std must be positive")
         self.symmetry = symmetry
         self.symmetry_coef = symmetry_coef
         self.mirror = mirror
         """(observation mirror, action mirror), rebuilt from the environment on every run."""
+        self.max_std = max_std
+        """Ceiling on the learned action std; None leaves it free."""
         super().__init__(*args, **kwargs)
+
+    def _setup_learn(self, *args, **kwargs):
+        # Cap a resumed policy's std before the first rollout, not after the first update.
+        result = super()._setup_learn(*args, **kwargs)
+        self.cap_action_std()
+        return result
 
     def _excluded_save_params(self) -> list[str]:
         # Checkpoints stay loadable by plain PPO.load; the maps come from the environment.
@@ -89,9 +99,25 @@ class SymmetricPPO(PPO):
         with th.no_grad():
             log_std.copy_(0.5 * (log_std + log_std[..., perm]))
 
+    def cap_action_std(self) -> None:
+        """Clamp each action's std at ``max_std``.
+
+        Actions are clipped to [-1, 1] before the robot gets them, so once the noise overshoots
+        the limits a wider std changes nothing the robot does and nothing in the reward pushes
+        back, while the entropy bonus keeps pushing up: rough_0.0.2's std drifted to 2.32, with
+        66% of its training actions clipped. Below the cap the std is still learned.
+        """
+        log_std = getattr(self.policy, "log_std", None)
+        if self.max_std is None or log_std is None:
+            return
+        with th.no_grad():
+            log_std.clamp_(max=float(np.log(self.max_std)))
+
     def train(self) -> None:
         if self.symmetry == "none":
-            return super().train()
+            super().train()
+            self.cap_action_std()
+            return
         if self.symmetry not in self.MODES:
             raise ValueError(f"symmetry must be one of {self.MODES}")
         if self.mirror is None or not isinstance(self.action_space, spaces.Box):
@@ -100,7 +126,7 @@ class SymmetricPPO(PPO):
         use_loss = self.symmetry in ("loss", "both")
         use_augment = self.symmetry in ("augment", "both")
 
-        # Follows stable_baselines3 2.6.0 PPO.train; lines marked "symmetry" are additions.
+        # Follows stable_baselines3 2.6.0 PPO.train; lines marked "symmetry" or "max_std" are additions.
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
         clip_range = self.clip_range(self._current_progress_remaining)  # type: ignore[operator]
@@ -196,6 +222,7 @@ class SymmetricPPO(PPO):
                 self.policy.optimizer.step()
                 if use_augment:
                     self.symmetrise_action_std()  # symmetry
+                self.cap_action_std()  # max_std
 
             self._n_updates += 1
             if not continue_training:

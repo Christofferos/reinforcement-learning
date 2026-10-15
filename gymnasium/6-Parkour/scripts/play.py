@@ -166,8 +166,7 @@ def main() -> None:
     for episode in range(args.episodes):
         obs, info = env.reset(seed=args.seed + episode)
 
-        # The viewer window only exists after a render, and the env can close and recreate
-        # its renderer on reset, so (re)apply fullscreen at the start of every episode.
+        # The viewer window only exists after the first render; the env keeps it across resets.
         if args.viewer == "human" and not args.windowed:
             env.render()
             # Enable fullscreen without windowed mode.

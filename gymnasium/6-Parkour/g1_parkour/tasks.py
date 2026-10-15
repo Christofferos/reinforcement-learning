@@ -17,6 +17,7 @@ from gymnasium.envs.registration import register, registry
 
 from .env_cfg import ParkourEnvCfg, TerrainCfg
 from .mdp import EventCfg, ObservationCfg, RewardCfg, TerminationCfg
+from .terrain.parkour import DEFAULT_SKILLS
 
 ENTRY_POINT = "g1_parkour.env:ParkourEnv"
 
@@ -37,8 +38,25 @@ LOCOMOTION_REWARDS = dict(
     # keeps paying for longer steps, which faster commands need.
     feet_air_time=2.0, feet_step_ahead=5.0, feet_step_ahead_margin=0.3,
     feet_step_symmetry=-10.0, feet_slide=-0.1,
+    # rough_0.0.1 at d=0.5 had ~9 stumble steps per episode, and 8 of 19 falls came within 1 s
+    # of one; never on flat ground. A trip of a few steps costs a few points against the -30 fall.
+    feet_stumble=-1.0,
+    # rough_0.0.2 at d=1 stood a foot within 5 cm of a block-top edge on ~25 foot-steps per
+    # episode (never on hills alone), and 4 of 22 falls followed one within 1 s: about -13 per
+    # episode, in line with the stumble penalty. On a Procedural beam it keeps feet off the sides.
+    feet_edge=-0.5,
+    # Standing upright (1.53 m head top) under a d=1 tunnel bar (1.2 m) is 0.38 m too tall,
+    # -1.14 per step, while it is in reach of the upward rays: well under the ~3 per step a good
+    # walk earns, so ducking pays but stopping short of the tunnel never does. Zero without one.
+    ceiling_clearance=-3.0,
     # Facing the waypoint: walking 33 deg sideways at 0.58 m/s costs ~0.17 per step.
     heading=0.3, lateral_velocity=-0.2,
+    # Per-step budget at a good 1 m/s walk: progress ~1, tracking ~1, gait ~0.5, posture ~0.8,
+    # so no single term dominates the return. Procedural used to pay alive 0.05 and charge
+    # action_rate and angular_velocity -0.01, which changed the return scale a resumed value
+    # function expects.
+    velocity_tracking_sigma=0.5, base_height=0.5, alive=0.15, upright=0.1,
+    ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
 )
 
 # Keeps the height scan (flat => constant)
@@ -60,14 +78,7 @@ def flat_cfg() -> ParkourEnvCfg:
         command_speed_difficulty_shift=1.0,
         zero_command_prob=0.0,
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
-        reward=RewardCfg(
-            # Per-step budget at a good 1 m/s walk: progress ~1, tracking ~1, gait ~0.5,
-            # posture ~0.8, so no single term dominates the return.
-            **LOCOMOTION_REWARDS,
-            velocity_tracking=1.0, velocity_tracking_sigma=0.5, base_height=0.5,
-            alive=0.15, upright=0.1,
-            ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
-        ),
+        reward=RewardCfg(**LOCOMOTION_REWARDS, velocity_tracking=1.0),
         termination=TerminationCfg(
             bad_height_scale=0.75, recovery_grace_steps=20,
             stall_steps=500, stall_distance=0.15,
@@ -95,23 +106,18 @@ def rough_cfg() -> ParkourEnvCfg:
             difficulty_range=(0.0, 1.0),
         ),
         episode_length_s=60.0,
-        command_speed_range=(0.5, 1.25),
-        command_speed_difficulty_shift=1.0,
+        command_speed_range=(1.0, 2.0),
+        command_speed_difficulty_shift=0,
         zero_command_prob=0.0,
         observation=ObservationCfg(speed_command=True, overhead_scan=True),
-        reward=RewardCfg(
-            **LOCOMOTION_REWARDS,
-            velocity_tracking=1.5, velocity_tracking_sigma=1, base_height=0.5,
-            alive=0.15, upright=0.1,
-            ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
-        ),
+        reward=RewardCfg(**LOCOMOTION_REWARDS, velocity_tracking=1.5),
         termination=TerminationCfg(
             bad_height_scale=0.75, recovery_grace_steps=20,
             stall_steps=500, stall_distance=0.15,
         ),
         events=EventCfg(
             reset_noise_scale=0.02, reset_yaw_range=0.25, 
-            randomize_friction=True, randomize_mass=True, 
+            randomize_friction=True, randomize_mass=True, randomize_gear=True,
             push_robot=True, push_interval_steps=200, 
             push_velocity=0.25, push_velocity_difficulty_shift=0.5,
         ),
@@ -125,28 +131,48 @@ def parkour_cfg() -> ParkourEnvCfg:
         terrain=TerrainCfg(
             kind="parkour",
             difficulty=0.05,
-            params={"num_modules": 8},
+            # 4 modules at difficulty 0 to 8 at 1. The curriculum promotes on 80% of runs
+            # finishing the whole course, which over 8 modules needs ~97% success on each;
+            # rough_0.0.3 finished none of 40 eight-module courses at d=0.05.
+            # Extra practice where the last run failed (each weighted module ~16% of courses' modules,
+            # the rest ~5%). procedural_0.0.2 at d=0.38/0.6 failed hurdles 100%/100%, climbs 36%/71%
+            # and stepping stones 22%/55%, but beams 0% and gaps 6%/20%; procedural_0.0.1 had failed
+            # beam, stones and gap at d=0, which 3x practice there fixed. Every skill stays in the mix.
+            params={
+                "num_modules": 4, "num_modules_growth": 4,
+                "skill_weights": {
+                    **{skill: 1.0 for skill in DEFAULT_SKILLS},
+                    "hurdle": 3.0, "climb": 3.0, "stepping_stones": 3.0, "gap": 1.5,
+                },
+            },
             resample_every_n_resets=1,
             curriculum=True,
             difficulty_range=(0.0, 1.0),
         ),
-        episode_length_s=60.0,
-        command_speed_range=(0.5, 2.0),
-        command_speed_difficulty_shift=1.0,
-        observation=ObservationCfg(speed_command=True, overhead_scan=True),
-        reward=RewardCfg(
-            **LOCOMOTION_REWARDS,
-            velocity_tracking=1.5, base_height=0.5,
-            alive=0.05, upright=0.1,
-            ctrl_cost=-0.01, action_rate=-0.01, angular_velocity=-0.01,
+        episode_length_s=75.0,
+        # Rough's commands. (0.5, 2.0) plus a 1.0 difficulty shift asked for up to 3 m/s, far
+        # beyond the ~1 m/s the walker reaches, which taught rough_0.0.1 to ignore the command.
+        command_speed_range=(0.75, 1.5),
+        command_speed_difficulty_shift=0.0,
+        observation=ObservationCfg(
+            speed_command=True, overhead_scan=True,
+            # The same 9 x 5 rays at 0.2 m instead of 0.25 m: from 0.2 m behind to 1.4 m ahead and
+            # 0.4 m to each side, so beam and stone edges are placed to within 0.1 m.
+            scan_forward=(-0.2, 1.4), scan_lateral=(-0.4, 0.4),
+            # Off-course rays read -0.5, not -1.0: on Rough's scale (std ~0.12 m) -1.0 normalised to
+            # -7 std and saturated ~30% of the first tanh layer on beams, stones and gaps; at -0.5,
+            # 12-26%. procedural_0.0.1's beam went from 0/20 to 4/20 at -0.5 (14/20 at -0.3, which
+            # blurred pits with steps down). Ground 0.4 m or more below a robot at nominal height
+            # (the reading counts from 0.1 m above the torso) now reads the same as a pit.
+            scan_clip=(-0.5, 1.5),
         ),
-        termination=TerminationCfg(bad_height_scale=0.75, recovery_grace_steps=20),
+        reward=RewardCfg(**LOCOMOTION_REWARDS, velocity_tracking=1.5),
+        termination=TerminationCfg(bad_height_scale=0.70, recovery_grace_steps=20),
         events=EventCfg(
             reset_noise_scale=0.02,
-            reset_yaw_range=0.1,
-            randomize_friction=True,
+            reset_yaw_range=0.25,
             randomize_mass=True,
-            push_robot=True,
+            randomize_gear=True,
         ),
         debug_scan_markers=True,
     )
