@@ -17,7 +17,7 @@ from gymnasium.envs.registration import register, registry
 
 from .env_cfg import ParkourEnvCfg, TerrainCfg
 from .mdp import EventCfg, ObservationCfg, RewardCfg, TerminationCfg
-from .terrain.parkour import DEFAULT_SKILLS
+from .terrain.parkour import DEFAULT_SKILLS, INTRODUCED_SKILLS
 
 ENTRY_POINT = "g1_parkour.env:ParkourEnv"
 
@@ -45,10 +45,17 @@ LOCOMOTION_REWARDS = dict(
     # episode (never on hills alone), and 4 of 22 falls followed one within 1 s: about -13 per
     # episode, in line with the stumble penalty. On a Procedural beam it keeps feet off the sides.
     feet_edge=-0.5,
-    # Standing upright (1.53 m head top) under a d=1 tunnel bar (1.2 m) is 0.38 m too tall,
-    # -1.14 per step, while it is in reach of the upward rays: well under the ~3 per step a good
-    # walk earns, so ducking pays but stopping short of the tunnel never does. Zero without one.
-    ceiling_clearance=-3.0,
+    # Swing-foot lift with a hurdle, climb, stair or block ahead (0 on flat ground): at most 0.5
+    # per step and foot, about a sixth of a good walk's ~3 per step, and only near an obstacle.
+    feet_clearance=0.5,
+    # Standing upright (1.53 m head top) under a d=1 tunnel roof (1.25 m) is 0.33 m over (0.28 m
+    # too tall plus the 5 cm margin), -1.98 per step while the upward rays see it, from 0.4 m
+    # before the roof: still under the ~3 per step a good walk earns. Under
+    # the roof the robot's top can be no higher than the roof, so scraping along it is charged by
+    # contact instead: -1 a step, about a third of what a good walk earns, so ducking pays well
+    # and stopping short of a tunnel never does. procedural_0.0.5 scraped every d = 0.9 roof at
+    # -3 and no contact charge (about -7 per episode of a ~3600 return). Zero without a ceiling.
+    ceiling_clearance=-6.0, ceiling_contact=-1.0,
     # Facing the waypoint: walking 33 deg sideways at 0.58 m/s costs ~0.17 per step.
     heading=0.3, lateral_velocity=-0.2,
     # Per-step budget at a good 1 m/s walk: progress ~1, tracking ~1, gait ~0.5, posture ~0.8,
@@ -56,6 +63,11 @@ LOCOMOTION_REWARDS = dict(
     # action_rate and angular_velocity -0.01, which changed the return scale a resumed value
     # function expects.
     velocity_tracking_sigma=0.5, base_height=0.5, alive=0.15, upright=0.1,
+    # Posture and step-ups (from procedural_0.0.8): a crouched gait costs every step, -0.07 at
+    # procedural_0.0.7's 10 cm below standing height (its knees at -83 deg left no bend for a
+    # step-up), and the torso rising to standing height over a higher waypoint pays like progress
+    # (~23 for a 0.35 m climb), where climbs failed after a foot was already on top.
+    base_height_low=1.0, vertical_progress=1.0,
     ctrl_cost=-0.01, action_rate=-0.02, angular_velocity=-0.05,
 )
 
@@ -131,9 +143,13 @@ def parkour_cfg() -> ParkourEnvCfg:
         terrain=TerrainCfg(
             kind="parkour",
             difficulty=0.05,
-            # 4 modules at difficulty 0 to 8 at 1. The curriculum promotes on 80% of runs
-            # finishing the whole course, which over 8 modules needs ~97% success on each;
-            # rough_0.0.3 finished none of 40 eight-module courses at d=0.05.
+            # 4 modules to 8 as the skills' mean level goes from 0 to 1. Each skill has its own
+            # level, promoted at 85% of its last 20 modules passed and demoted under 60%
+            # (TerrainCfg.per_skill_difficulty), every module built at its skill's level along
+            # the whole course. One course level promoted on 80% of whole courses finished held
+            # every skill back to the weakest: procedural_0.0.5 ran clean at d = 0.9 on ramps,
+            # rubble and lateral shifts while hurdles stopped at 0.31 m. Before that, courses
+            # ramped from 0.35 x the level at the start to the level at the end.
             # Extra practice where the last run failed (each weighted module ~16% of courses' modules,
             # the rest ~5%). procedural_0.0.2 at d=0.38/0.6 failed hurdles 100%/100%, climbs 36%/71%
             # and stepping stones 22%/55%, but beams 0% and gaps 6%/20%; procedural_0.0.1 had failed
@@ -142,17 +158,46 @@ def parkour_cfg() -> ParkourEnvCfg:
                 "num_modules": 4, "num_modules_growth": 4,
                 "skill_weights": {
                     **{skill: 1.0 for skill in DEFAULT_SKILLS},
-                    "hurdle": 3.0, "climb": 3.0, "stepping_stones": 3.0, "gap": 1.5,
+                    "hurdle": 3.0, "beam": 3.0, "climb": 3.0, "stepping_stones": 2.0, "gap": 2.0,
+                    "stairs_up": 2.0, "tunnel": 2.0, "stairs_down": 1.5,
+                    # ramp and rubble back at 1.0: at 0.5, procedural_0.0.4 slipped on them at
+                    # d = 0.9 (ramp 16 -> 12, rubble 16 -> 13 of 16).
+                    "run": 0.5, "lateral_shift": 0.5,
+                    # Introduced from procedural_0.0.7. Each starts at level 0.05 (absent from older
+                    # checkpoints' state), where level-scaled practice gives it nearly its full
+                    # weight while mastered skills get a quarter of theirs: at 0.5 the eight took
+                    # 30% of modules from procedural_0.0.6's levels (hurdles 18% -> 13%); at 0.3,
+                    # about 20%, shrinking as they level up.
+                    **{skill: 0.3 for skill in INTRODUCED_SKILLS},
                 },
             },
             resample_every_n_resets=1,
             curriculum=True,
             difficulty_range=(0.0, 1.0),
+            per_skill_difficulty=True,
+            # A skill at level 1 gets a quarter of the modules it would at 0: procedural_0.0.6
+            # ended with six skills at 0.97-1.0 still drawn at their full weights, while stepping
+            # stones (0.38), hurdles (0.61) and stairs up (0.62) were the ones still climbing.
+            skill_maintain_share=0.25,
+            # Precise foot placement: procedural_0.0.6 passed d = 0.5 stones 83% deterministic but
+            # 67% with its sampled noise (std 0.35), so their level sank 0.58 -> 0.38 against the
+            # 60% demotion line while the noise-free policy did well even at d = 0.7.
+            skill_action_noise={"stepping_stones": 0.6},
+            # A fifth of modules at a random easier level and a tenth up to two steps above:
+            # procedural_0.0.6 trained each skill only at its level and lost easy gaps (d = 0.5
+            # 16 -> 12 of 16) while its d = 0.9 gaps went 5 -> 15, and saw no hurdle taller than
+            # its level before a promotion.
+            skill_review_share=0.2, skill_preview_share=0.1, skill_preview_range=0.1,
+            # The levels are judged on noisy training attempts, which pass 16-28 points less
+            # often than the noise-free policy (hurdle at 0.6: 97% vs 69%; climb at 0.7: 100% vs
+            # 75%), so 85% / 60% held every skill a step or two below what it can do.
+            skill_promote_rate=0.75, skill_demote_rate=0.5,
         ),
         episode_length_s=75.0,
         # Rough's commands. (0.5, 2.0) plus a 1.0 difficulty shift asked for up to 3 m/s, far
         # beyond the ~1 m/s the walker reaches, which taught rough_0.0.1 to ignore the command.
-        command_speed_range=(0.75, 1.5),
+        # Procedural's speed commands v1. (0.75, 1.5)
+        command_speed_range=(1.0, 1.75),
         command_speed_difficulty_shift=0.0,
         observation=ObservationCfg(
             speed_command=True, overhead_scan=True,
@@ -167,7 +212,16 @@ def parkour_cfg() -> ParkourEnvCfg:
             scan_clip=(-0.5, 1.5),
         ),
         reward=RewardCfg(**LOCOMOTION_REWARDS, velocity_tracking=1.5),
-        termination=TerminationCfg(bad_height_scale=0.70, recovery_grace_steps=20),
+        # Under a tunnel bar the torso may drop to 0.475 m above the floor instead of 0.665 m:
+        # procedural_0.0.3 fell crouching under 7 of 16 d = 0.9 bars and got stuck at 8.
+        termination=TerminationCfg(
+            bad_height_scale=0.70, recovery_grace_steps=20, ceiling_bad_height_scale=0.5,
+            # On hands and knees under an air vent's roof (at most 1.22 m; tunnels are 1.25 m or
+            # more): the torso down to 0.24 m above the floor and tilted up to 110 degrees. The
+            # deepest kneeling pose the actions reach (hips 76 deg, knees 87 deg, shins and forearms
+            # down) held at 0.31 m and -0.16 upright, so 0.285 m and -0.17 left no room to rock.
+            crawl_bad_height_scale=0.25, crawl_orientation_limit=-0.35,
+        ),
         events=EventCfg(
             reset_noise_scale=0.02,
             reset_yaw_range=0.25,
@@ -176,6 +230,21 @@ def parkour_cfg() -> ParkourEnvCfg:
         ),
         debug_scan_markers=True,
     )
+
+
+def equal_module_mix(cfg: ParkourEnvCfg, skills: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """Make an evaluation's parkour courses draw ``skills`` (by default the training skills, those
+    with a positive weight) each equally often, without training's level-scaled practice, which
+    makes mastered skills rare. Returns the skills; non-parkour configs are left alone."""
+    terrain = cfg.terrain
+    if terrain.kind != "parkour":
+        return ()
+    if skills is None:
+        weights = terrain.params.get("skill_weights") or {}
+        skills = tuple(s for s in terrain.params.get("skills", DEFAULT_SKILLS) if weights.get(s, 1.0 if not weights else 0.0) > 0)
+    terrain.params = {**terrain.params, "skills": tuple(skills), "skill_weights": dict.fromkeys(skills, 1.0)}
+    terrain.skill_maintain_share = None
+    return tuple(skills)
 
 
 # --------------------------------------------------------------------------------------

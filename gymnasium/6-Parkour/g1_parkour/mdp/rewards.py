@@ -26,11 +26,42 @@ class RewardCfg:
     base_height: float = 0.0
     base_height_clearance_margin: float = 0.05
     """Safety gap above the robot when lowering its posture target for overhead clearance."""
+    base_height_low: float = 0.0
+    """Penalty per metre per step that the torso is below its standing height (``nominal_base_height``
+    over the ground holding it up, lowered under a ceiling, the ``base_height`` target) beyond
+    ``base_height_low_deadband``. Linear and charged every step, so a crouched gait keeps costing:
+    procedural_0.0.7 walked flat ground with its torso at 1.15 m and its knees at a median -83
+    degrees (the action range allows -87), which the quadratic ``base_height`` charged 0.004 a
+    step. Zero under a tunnel or vent roof that asks for the crouch."""
+    base_height_low_deadband: float = 0.03
+    vertical_progress: float = 0.0
+    """Pay per m/s that the torso closes its height gap to standing height over the active
+    waypoint (``progress``'s vertical twin, measured against the same target across the step).
+    ``base_height`` measures against the ground under the torso, so with a foot on a climb's top
+    and the torso still over the floor below it asked for nothing more; procedural_0.0.6-0.0.7
+    failed climbs exactly there. The gap counts only beyond ``vertical_progress_deadband``, so
+    descents, flat ground and gait bobbing pay nothing. It is the change of one height measure,
+    rises and drops alike (a potential), so any stumble, crouch or jump and its recovery nets
+    zero, and an ending repays the drops it charged and the robot did not climb back, so a fall
+    costs nothing extra here (the gap a higher waypoint opens is never charged, so a failed climb
+    is not paid as if it had climbed). Paying
+    rises only with a foot down made it one-sided: replaying procedural_0.0.7 it then netted -9
+    to -17 per module, charging every landing of a running stride; without the repayment a fall
+    cost a second ~-50 on top of ``fall_penalty``, making an attempt dearer than a stall. Not
+    clipped, which would break the balance."""
+    vertical_progress_deadband: float = 0.15
+    """Metres of gap ignored: procedural_0.0.7's gait rode 0.10 m below standing height on flat
+    ground; a 0.35 m climb leaves 0.3 m, a 0.2 m stair step about 0.15 m."""
     ceiling_clearance: float = 0.0
     """Penalty per metre per step that the robot's top is above the lowest ceiling the upward
     rays see, less ``base_height_clearance_margin``. Zero without a ceiling. Linear, so it keeps
     pulling the robot down all the way, where the quadratic ``base_height`` target charged only
     0.072 per step for standing 0.38 m too tall under a d=1 tunnel bar."""
+    ceiling_contact: float = 0.0
+    """Penalty per step that any part of the robot touches a ceiling. ``ceiling_clearance``
+    cannot charge for scraping under one: pressed against the roof, the robot's top is level
+    with it. procedural_0.0.5 shoved under every d = 0.9 tunnel roof with its torso and arms,
+    wedged at the front edge on 3 of 12 and pitched over past the end on 6."""
     lateral_velocity: float = -0.1
     angular_velocity: float = -0.02
     action_rate: float = -0.05
@@ -72,6 +103,17 @@ class RewardCfg:
     the edges found by sampling the ground around the foot instead of a precomputed mask."""
     feet_edge_margin: float = 0.05
     feet_edge_drop: float = 0.05
+    feet_clearance: float = 0.0
+    """Swing-foot lift, paid only with an obstacle ahead: while the ground scan shows terrain at
+    least ``feet_clearance_min_obstacle`` above the floor the robot stands on, within
+    ``feet_clearance_window`` m ahead (and 0.2 m to either side), each foot in the air earns its
+    height above that floor as a share of the obstacle plus ``feet_clearance_margin``, at most
+    1. Nothing on flat ground, for a planted foot, or without forward motion, so it never pays
+    for high-stepping in general or for lifting a foot in place in front of a hurdle.
+    procedural_0.0.2-0.0.4 stalled at hurdles and climbs of 0.24, 0.30 and 0.33 m."""
+    feet_clearance_min_obstacle: float = 0.1
+    feet_clearance_margin: float = 0.05
+    feet_clearance_window: tuple[float, float] = (-0.2, 0.6)
     gate_on_support: bool = True
     """Pay ``progress`` and ``velocity_tracking`` only while the base is in a healthy pose
     (height and tilt inside the termination band), so a slow fall earns nothing."""
@@ -102,8 +144,12 @@ def terms(
     feet_slide_speed: float = 0.0,
     stumbling: bool = False,
     feet_at_edge: int = 0,
+    feet_clearance: float = 0.0,
     ceiling_overlap: float = 0.0,
+    ceiling_touch: bool = False,
     supported: bool = True,
+    height_deficit: float = 0.0,
+    vertical_rate: float = 0.0,
 ) -> dict[str, float]:
     progress_limit = cfg.clip_progress if target_speed is None else min(cfg.clip_progress, target_speed)
     progress_rate = float(np.clip(progress / dt, -progress_limit, progress_limit))
@@ -121,13 +167,17 @@ def terms(
         "feet_slide": cfg.feet_slide * feet_slide_speed,
         "feet_stumble": cfg.feet_stumble * float(stumbling),
         "feet_edge": cfg.feet_edge * feet_at_edge,
+        "feet_clearance": cfg.feet_clearance * feet_clearance if moving else 0.0,
         "ceiling_clearance": cfg.ceiling_clearance * ceiling_overlap,
+        "ceiling_contact": cfg.ceiling_contact * float(ceiling_touch),
         "waypoint_bonus": cfg.waypoint_bonus * waypoints_reached,
         "goal_bonus": cfg.goal_bonus * float(reached_goal),
         "heading": cfg.heading * heading_alignment,
         "alive": cfg.alive,
         "upright": cfg.upright * upright,
         "base_height": cfg.base_height * -(height_error**2),
+        "base_height_low": cfg.base_height_low * -max(0.0, height_deficit - cfg.base_height_low_deadband),
+        "vertical_progress": cfg.vertical_progress * vertical_rate,
         "lateral_velocity": cfg.lateral_velocity * abs(lateral_speed),
         "angular_velocity": cfg.angular_velocity * float(np.sum(np.square(ang_vel[:2]))),
         "action_rate": cfg.action_rate * float(np.sum(np.square(action - prev_action))),

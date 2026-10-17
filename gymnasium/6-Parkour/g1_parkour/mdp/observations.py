@@ -83,14 +83,20 @@ def projected_gravity(quat: np.ndarray) -> np.ndarray:
     return quat_to_mat(quat).T @ np.array([0.0, 0.0, -1.0])
 
 
-def ground_ray(model, data, start, ceilings: frozenset[int] = frozenset()) -> float:
+def ground_ray(model, data, start, ceilings: frozenset[int] = frozenset(),
+               walls: frozenset[int] = frozenset()) -> float:
     """Distance straight down from ``start`` to the terrain, or -1 on a miss.
 
     A ray that meets one of the ``ceilings`` geom ids (from above, or from inside, where
     ``mj_ray`` reports its underside) continues from just below it, so a tunnel bar ahead of a
     standing robot reads as the floor beneath it rather than a wall. Ceilings must be boxes.
+    A ray that starts inside one of the ``walls`` (boxes taller than a ray's start, as in a
+    tilt passage) reads it at distance 0: ``mj_ray`` skips a geom that contains its start, so
+    the wall read as the floor beside it. ``height_scan`` checks its whole grid at once instead.
     """
     origin = np.array(start, dtype=np.float64)
+    if any(_inside_box(model, data, wall, origin) for wall in walls):
+        return 0.0
     direction = np.array([0.0, 0.0, -1.0])
     geom_id = np.zeros(1, dtype=np.int32)
     travelled = 0.0
@@ -112,6 +118,7 @@ def height_scan(
     yaw: float,
     cfg: ObservationCfg,
     ceilings: frozenset[int] = frozenset(),
+    walls: frozenset[int] = frozenset(),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Ray-cast a yaw-aligned grid downwards.
 
@@ -126,8 +133,12 @@ def height_scan(
 
     heights = np.empty(len(points))
     hits = np.empty((len(points), 3))
+    starts = np.column_stack([world_x, world_y, np.full(len(points), origin[2])])
+    in_wall = np.zeros(len(points), dtype=bool)
+    for wall in walls:  # one vectorised check per wall instead of one call per ray
+        in_wall |= _inside_box_points(model, data, wall, starts)
     for i in range(len(points)):
-        dist = ground_ray(model, data, (world_x[i], world_y[i], origin[2]), ceilings)
+        dist = 0.0 if in_wall[i] else ground_ray(model, data, starts[i], ceilings)
         if dist < 0 or dist > cfg.scan_max_depth:
             dist = cfg.scan_max_depth
         heights[i] = dist
@@ -144,8 +155,8 @@ def overhead_scan(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cast upwards from a low, yaw-aligned line; cap misses at the maximum range.
 
-    A ray that starts inside a terrain box (a hurdle, climb or stair taller than
-    ``overhead_origin_height`` ahead) counts as a miss: ``mj_ray`` reports that box's top face
+    A ray that starts inside a terrain box or cylinder (a hurdle, climb, stair or sand bank
+    taller than ``overhead_origin_height`` ahead) counts as a miss: ``mj_ray`` reports that box's top face
     from the inside, which is something to step onto, not duck under. Heightfields are not
     checked.
     """
@@ -169,9 +180,20 @@ def overhead_scan(
     return depths, hits
 
 
+def _inside_box_points(model, data, geom: int, points: np.ndarray) -> np.ndarray:
+    """Which of ``points`` (N x 3) lie inside box ``geom``, rotated or not."""
+    local = (points - data.geom_xpos[geom]) @ data.geom_xmat[geom].reshape(3, 3)
+    return np.all(np.abs(local) <= model.geom_size[geom], axis=1)
+
+
 def _inside_box(model, data, geom: int, point: np.ndarray) -> bool:
-    """Whether ``point`` lies inside ``geom`` when it is a box, rotated boxes included."""
-    if model.geom_type[geom] != mujoco.mjtGeom.mjGEOM_BOX:
+    """Whether ``point`` lies inside ``geom`` when it is a box or a cylinder (a water tank's sand
+    bank), rotated ones included."""
+    kind = model.geom_type[geom]
+    if kind not in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_CYLINDER):
         return False
     local = data.geom_xmat[geom].reshape(3, 3).T @ (point - data.geom_xpos[geom])
-    return bool(np.all(np.abs(local) <= model.geom_size[geom]))
+    size = model.geom_size[geom]
+    if kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+        return bool(np.hypot(local[0], local[1]) <= size[0] and abs(local[2]) <= size[1])
+    return bool(np.all(np.abs(local) <= size))

@@ -10,10 +10,17 @@ Examples::
 
     python scripts/play.py Procedural --checkpoint models/<run>/final.zip
     python scripts/play.py Procedural --checkpoint models/<run>/final.zip --difficulty 0.3
+    python scripts/play.py Procedural --skills water_tank --difficulty 1   # one module type only
 
-Playback uses one fixed terrain difficulty with the curriculum off: ``--difficulty`` if given,
-otherwise the mean level saved with the checkpoint (``.state.json``), otherwise the task's
-starting difficulty.
+Playback fixes the terrain difficulty with the curriculum off: ``--difficulty`` for every
+module if given, otherwise the levels saved with the checkpoint (``.state.json``; each skill's
+mean over the training workers for a per-skill run, so courses look as they did in training),
+otherwise the task's starting difficulty. A skill the checkpoint never trained, such as a newly
+added module, starts at the task's starting difficulty.
+
+Procedural courses draw from every module, experimental ones included, each equally likely, so
+evaluation sees them all; ``--training-mix`` draws only the training skills, also each equally
+likely, and ``--skills`` names the modules.
 """
 
 from __future__ import annotations
@@ -60,13 +67,15 @@ def load_obs_normalizer(checkpoint: str):
     return normalizer.normalize_obs
 
 
-def saved_difficulty(checkpoint, step: float) -> float | None:
-    """Mean worker difficulty saved with ``checkpoint``, snapped to the curriculum grid."""
+def saved_difficulty(checkpoint, step: float) -> float | dict[str, float] | None:
+    """Mean worker difficulty saved with ``checkpoint``, snapped to the curriculum grid: one
+    level, or each skill's for a per-skill run."""
     path = Path(checkpoint).with_suffix(".state.json")
     if not path.exists():
         return None
-    level = float(np.mean(json.loads(path.read_text())["difficulties"]))
-    return round(round(level / step) * step, 6) if step > 0 else level
+    from g1_parkour.env import mean_curriculum_state
+
+    return mean_curriculum_state(json.loads(path.read_text())["difficulties"], step)
 
 
 def configure_difficulty(cfg, requested: float | None, checkpoint: str | None) -> str:
@@ -80,9 +89,31 @@ def configure_difficulty(cfg, requested: float | None, checkpoint: str | None) -
     else:
         level, source = terrain.difficulty, "task default"
     low, high = terrain.difficulty_range
-    terrain.difficulty = float(np.clip(level, low, high))
+    if isinstance(level, dict):
+        terrain.skill_difficulty = level  # skills it leaves out start at the task's level
+    else:
+        terrain.difficulty = float(np.clip(level, low, high))
+        terrain.skill_difficulty = None
     terrain.curriculum = False
     return source
+
+
+def configure_skills(cfg, skills: list[str] | None, training_mix: bool) -> str:
+    """Pick the modules playback courses draw from, each equally likely, and say which: ``skills``
+    if named, the training skills with ``training_mix``, otherwise every module (experimental
+    ones included). Only parkour courses have modules."""
+    from g1_parkour.terrain.parkour import MODULES
+
+    if cfg.terrain.kind != "parkour":
+        return ""
+    if skills:
+        cfg.terrain.params = {**cfg.terrain.params, "skills": tuple(skills)}
+        return f"modules: {', '.join(skills)}"
+    if training_mix:
+        chosen = tasks.equal_module_mix(cfg)
+        return f"modules: the {len(chosen)} training skills, equally likely"
+    tasks.equal_module_mix(cfg, tuple(MODULES))
+    return f"modules: all {len(MODULES)}, equally likely (--training-mix for the training skills only)"
 
 
 def make_fullscreen(env) -> bool:
@@ -117,7 +148,9 @@ def make_fullscreen(env) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--camera", default="side_view", help="e.g. side_view, chase_view, egocentric")
+    parser.add_argument("--camera", default="side_view",
+                        help="side_view, chase_view, front_view or egocentric (first person, steadied like a "
+                             "head; TAB in the viewer also cycles through them)")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--speed", type=float, default=0.5,
                         help="playback speed as a fraction of real time (default 0.5); 1.0 runs as fast as the sim allows")
@@ -134,13 +167,26 @@ def main() -> None:
     parser.add_argument("--difficulty", type=float, default=None,
                         help="fixed terrain difficulty in [0, 1]; by default the level saved with --checkpoint, "
                              "else the task's starting difficulty")
+    parser.add_argument("--skills", nargs="+", default=None,
+                        help="Procedural courses built from only these modules, e.g. water_tank, "
+                             "which training does not use yet, each at its saved level or --difficulty")
+    parser.add_argument("--training-mix", action="store_true",
+                        help="Procedural courses from the training skills only, each equally often; by default "
+                             "playback draws every module, experimental ones included, equally often")
     args = parser.parse_args()
     if args.difficulty is not None and not 0.0 <= args.difficulty <= 1.0:
         parser.error("difficulty must be in [0, 1]")
 
     cfg = tasks.TASKS[args.task]()
     source = configure_difficulty(cfg, args.difficulty, args.checkpoint)
-    print(f"difficulty {cfg.terrain.difficulty:.2f} from {source}; curriculum off for playback")
+    mix = configure_skills(cfg, args.skills, args.training_mix)
+    if mix:
+        print(mix)
+    if cfg.terrain.skill_difficulty:
+        levels = ", ".join(f"{skill} {level:.2f}" for skill, level in cfg.terrain.skill_difficulty.items())
+        print(f"per-skill difficulty from {source}: {levels}; curriculum off for playback")
+    else:
+        print(f"difficulty {cfg.terrain.difficulty:.2f} from {source}; curriculum off for playback")
     env = gym.make(
         args.task,
         cfg=cfg,

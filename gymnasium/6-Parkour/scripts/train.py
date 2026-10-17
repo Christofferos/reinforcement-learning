@@ -37,7 +37,7 @@ from g1_parkour import tasks  # noqa: E402,F401
 ROOT = Path(__file__).resolve().parents[1]
 TERMINATION_REASONS = (
     "bad_orientation", "bad_height", "stall", "goal", "timeout", "fell_off_course",
-    "out_of_bounds",
+    "out_of_bounds", "too_slow",
 )
 
 
@@ -70,6 +70,8 @@ def evaluate_progress(model, env, episodes: int = 20) -> dict:
         "difficulty": env.terrain.difficulty,
         "endings": dict(endings),
     }
+    if isinstance(env.curriculum_state(), dict):
+        stats["skill_difficulty"] = env.curriculum_state()
     if velocity_errors:
         stats["velocity_tracking_error_mean"] = float(np.mean(velocity_errors))
     return stats
@@ -166,7 +168,7 @@ class ProgressCallback(BaseCallback):
     def save_state(self, name: str) -> None:
         state = {
             "num_timesteps": self.model.num_timesteps,
-            "difficulties": self.training_env.get_attr("_difficulty"),
+            "difficulties": self.training_env.env_method("curriculum_state"),
         }
         (self.model_dir / f"{name}.state.json").write_text(json.dumps(state, indent=2))
 
@@ -183,11 +185,12 @@ class ProgressCallback(BaseCallback):
         self.logger.dump(step=self.model.num_timesteps)
 
     def _evaluate(self) -> None:
-        # Follow the workers so evaluation measures the current curriculum level, snapped
-        # to the difficulty grid they train on.
+        # Follow the workers so evaluation measures the current curriculum level (each skill's,
+        # for a per-skill task), snapped to the difficulty grid they train on.
+        from g1_parkour.env import mean_curriculum_state
+
         step = self.eval_env.cfg.terrain.difficulty_step
-        mean_difficulty = float(np.mean(self.training_env.get_attr("_difficulty")))
-        self.eval_env.set_difficulty(round(mean_difficulty / step) * step)
+        self.eval_env.set_difficulty(mean_curriculum_state(self.training_env.env_method("curriculum_state"), step))
         stats = evaluate_progress(self.model, self.eval_env)
         stats["num_timesteps"] = self.model.num_timesteps
         with (self.model_dir / "evaluations.jsonl").open("a") as output:
@@ -226,6 +229,30 @@ class ProgressCallback(BaseCallback):
             values = [info[key] for info in self.episodes if key in info]
             if values:
                 self.logger.record(f"progress/{key}", float(np.mean(values)))
+        # Per-skill runs: each skill's mean level, and the share of its modules passed.
+        # skill_pass_rate is at the skills' levels (what promotion counts); review and preview
+        # modules (easier and harder practice) have their own sections.
+        levels, attempts, practice, shares = {}, {}, {}, {}
+        for info in self.episodes:
+            for skill, level in info.get("skill_difficulty", {}).items():
+                levels.setdefault(skill, []).append(level)
+            for skill, passed in info.get("module_results", []):
+                attempts.setdefault(skill, []).append(passed)
+                shares[skill] = shares.get(skill, 0) + 1
+            for skill, passed, kind in info.get("module_practice_results", []):
+                practice.setdefault((kind, skill), []).append(passed)
+                shares[skill] = shares.get(skill, 0) + 1
+        for skill, values in levels.items():
+            self.logger.record(f"skill_difficulty/{skill}", float(np.mean(values)))
+        if levels:  # the skill-weighted mean, as progress/difficulty, beside the skills
+            self.logger.record("skill_difficulty/mean", float(np.mean([info["difficulty"] for info in self.episodes])))
+        for skill, values in attempts.items():
+            self.logger.record(f"skill_pass_rate/{skill}", float(np.mean(values)))
+        for (kind, skill), values in practice.items():
+            self.logger.record(f"skill_{kind}_pass_rate/{skill}", float(np.mean(values)))
+        total = sum(shares.values())
+        for skill, count in shares.items():
+            self.logger.record(f"skill_share/{skill}", count / total)  # of all module attempts
         velocity_errors = [info["velocity_tracking_error"] for info in self.episodes
                            if "velocity_tracking_error" in info]
         if velocity_errors:
@@ -273,7 +300,9 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--log-dir", default=str(ROOT / "logs"),
                         help="parent directory for per-run TensorBoard, CSV and JSON logs")
-    parser.add_argument("--subproc", action="store_true", help="use SubprocVecEnv workers")
+    parser.add_argument("--subproc", action=argparse.BooleanOptionalAction, default=True,
+                        help="step the environments in parallel worker processes (default; about 2.4x faster "
+                             "on 8 cores); --no-subproc steps them in this process, easier to debug")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="PPO learning rate, also applied on resume")
     parser.add_argument("--gamma", type=float, default=0.999, help="PPO discount factor")
     parser.add_argument("--batch-size", type=int, default=256, help="PPO minibatch size")
@@ -284,13 +313,19 @@ def main() -> None:
                         help="PPO hidden layer widths for a fresh policy (default 256 256); cannot be changed on resume")
     parser.add_argument("--log-std-init", type=float, default=-1.0,
                         help="initial log standard deviation of a fresh PPO policy (exp(-1) ~ 0.37 of the action range)")
-    parser.add_argument("--max-std", type=float, default=None,
+    parser.add_argument("--max-std", type=float, default=0.35,
                         help="ceiling on the PPO action std, also applied to a resumed policy before its first "
-                             "rollout (actions are clipped to [-1, 1]; rough_0.0.2's std drifted to 2.32 without one)")
+                             "rollout (actions are clipped to [-1, 1]; rough_0.0.2's std drifted to 2.32 without one, "
+                             "and procedural_0.0.3-0.0.4 sat at a 0.5 ceiling throughout)")
     parser.add_argument("--symmetry", choices=("loss", "augment", "both", "none"), default="both",
                         help="left/right mirror symmetry for PPO: a mirror loss on the policy mean (loss), "
                              "mirrored minibatch copies with a mirror-symmetric action std (augment), "
                              "both (default), or none")
+    parser.add_argument("--bounds-coef", type=float, default=0.02,
+                        help="weight of the PPO action-bounds loss on action means outside [-1, 1] (0 turns it "
+                             "off). procedural_0.0.4-0.0.7 kept 88%% of hip and knee means outside, bang-bang "
+                             "control no noise could reach (a loss of ~78 per sample). Resuming 0.0.7, 25 "
+                             "updates took it to 78 at 0.001, 57 at 0.02 and 47 at 0.1, KL unchanged")
     parser.add_argument("--symmetry-coef", type=float, default=1.0,
                         help="weight of the mirror loss for --symmetry loss/both")
     parser.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=True,
@@ -316,6 +351,8 @@ def main() -> None:
         parser.error("--symmetry needs PPO; pass --symmetry none for other algorithms")
     if not np.isfinite(args.symmetry_coef) or args.symmetry_coef < 0:
         parser.error("symmetry coefficient must be finite and non-negative")
+    if not np.isfinite(args.bounds_coef) or args.bounds_coef < 0:
+        parser.error("bounds coefficient must be finite and non-negative")
 
     from stable_baselines3.common.env_util import make_vec_env
     from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
@@ -327,7 +364,7 @@ def main() -> None:
     run_log_dir = log_dir / run_name
     model_dir.mkdir(parents=True, exist_ok=False)
 
-    vec_cls = SubprocVecEnv if args.subproc else DummyVecEnv
+    vec_cls = SubprocVecEnv if args.subproc and args.num_envs > 1 else DummyVecEnv
     env = make_vec_env(
         args.task,
         n_envs=args.num_envs,
@@ -359,7 +396,7 @@ def main() -> None:
         options = dict(learning_rate=args.learning_rate, gamma=args.gamma,
                        batch_size=args.batch_size, n_epochs=args.n_epochs, target_kl=args.target_kl,
                        ent_coef=args.ent_coef, symmetry=args.symmetry, symmetry_coef=args.symmetry_coef,
-                       max_std=args.max_std,
+                       max_std=args.max_std, bounds_coef=args.bounds_coef,
                        mirror=(eval_env.observation_mirror(), eval_env.action_mirror())
                        if args.symmetry != "none" else None)
         if not args.resume:
@@ -376,6 +413,8 @@ def main() -> None:
         resumed_task = checkpoint_task(args.resume)
         if difficulties is not None:
             print(f"restored terrain difficulties: {difficulties}")
+            if not isinstance(difficulties[0], dict) and isinstance(env.env_method("curriculum_state", indices=0)[0], dict):
+                print("one-level checkpoint into per-skill levels: every skill starts at its worker's saved level")
         elif resumed_task not in (None, args.task):
             print(f"checkpoint trained on {resumed_task}; starting {args.task} at its initial difficulty")
         else:

@@ -44,6 +44,8 @@ def repair_run(model_dir, progress_csv, step: float = 0.05,
     repaired = []
     for path in sorted(Path(model_dir).glob("*.state.json")):
         state = json.loads(path.read_text())
+        if any(isinstance(worker, dict) for worker in state["difficulties"]):
+            continue  # per-skill levels, saved from the environments themselves
         _, logged = min(log, key=lambda entry: abs(entry[0] - state["num_timesteps"]))
         saved = sum(state["difficulties"]) / len(state["difficulties"])
         if abs(saved - logged) <= step:

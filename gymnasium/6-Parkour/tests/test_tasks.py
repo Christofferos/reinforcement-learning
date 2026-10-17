@@ -310,7 +310,7 @@ def test_overhead_scan_hits_tunnel_underside(difficulty, yaw):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     forward = np.array([np.cos(yaw), np.sin(yaw)])
-    clearance = 1.45 - 0.25 * difficulty
+    clearance = 1.45 - 0.2 * difficulty
     for index, offset in enumerate(cfg.overhead_offsets):
         origin = np.array([0.0, 0.0, 2.0 + cfg.overhead_origin_height])
         origin[:2] = (1.75 - offset) * forward
@@ -398,8 +398,13 @@ def test_overhead_observations_and_markers(monkeypatch, debug_markers, delay, in
     from g1_parkour.terrain.parkour import Cursor, mod_tunnel
 
     tunnel = mod_tunnel(np.random.default_rng(0), 1.0, Cursor())
-    # Spawn so only the farthest ray reaches the bar centre at x = 1.75.
-    spawn_x = 1.75 - tasks.parkour_cfg().observation.overhead_offsets[-1]
+    bar = next(box for box in tunnel.boxes if box.ceiling)
+    underside = bar.pos[2] - bar.size[2]
+    depth = underside - tasks.parkour_cfg().observation.overhead_origin_height
+    # Spawn so only the farthest ray reaches under the bar, 5 cm past its near edge.
+    reach = tasks.parkour_cfg().observation.overhead_offsets[-1]
+    far_ray_x = bar.pos[0] - bar.size[0] + 0.05
+    spawn_x = far_ray_x - reach
     terrain = TerrainSpec(
         name="tunnel_test", boxes=tunnel.boxes,
         waypoints=np.asarray(tunnel.waypoints), spawn_pos=(spawn_x, 0.0, 0.0),
@@ -417,14 +422,14 @@ def test_overhead_observations_and_markers(monkeypatch, debug_markers, delay, in
     try:
         obs, _ = env.reset(seed=0)
         assert obs.shape == ((116,) if include_observation else (113,))
-        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.7])
+        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, depth])
         if include_observation:
-            np.testing.assert_allclose(obs[-3:], [2.0, 2.0, 0.7])
+            np.testing.assert_allclose(obs[-3:], [2.0, 2.0, depth])
         assert len(env._overhead_marker_ids) == (3 if debug_markers else 0)
         if debug_markers:
             np.testing.assert_allclose(
                 env.data.geom_xpos[env._overhead_marker_ids],
-                [[0.0, 0.0, -50.0], [0.0, 0.0, -50.0], [1.75, 0.0, 1.2]],
+                [[0.0, 0.0, -50.0], [0.0, 0.0, -50.0], [far_ray_x, 0.0, underside]],
             )
             np.testing.assert_allclose(
                 env.model.geom_pos[env._overhead_marker_ids],
@@ -437,7 +442,7 @@ def test_overhead_observations_and_markers(monkeypatch, debug_markers, delay, in
         np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 2.0])
         obs, _ = env.reset(seed=0)
         assert len(env._overhead_buffer) == 1
-        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, 0.7])
+        np.testing.assert_allclose(env._overhead_buffer[0], [2.0, 2.0, depth])
         env.cfg.observation.overhead_scan = False
         legacy_obs = env._compute_observation()
         assert legacy_obs.shape == (113,)
@@ -824,8 +829,13 @@ def test_flat_rejects_invalid_speed_ranges(speeds):
 
 
 def test_parkour_difficulty_changes_geometry():
-    easy = build_terrain("parkour", np.random.default_rng(3), difficulty=0.0, num_modules=8)
-    hard = build_terrain("parkour", np.random.default_rng(3), difficulty=1.0, num_modules=8)
+    # The original skills, whose random draws do not depend on difficulty (a crumbling bridge's
+    # plank count does), so both courses pick the same modules.
+    from g1_parkour.terrain.parkour import DEFAULT_SKILLS, INTRODUCED_SKILLS
+
+    core = tuple(s for s in DEFAULT_SKILLS if s not in INTRODUCED_SKILLS)
+    easy = build_terrain("parkour", np.random.default_rng(3), difficulty=0.0, num_modules=8, skills=core)
+    hard = build_terrain("parkour", np.random.default_rng(3), difficulty=1.0, num_modules=8, skills=core)
     assert easy.modules == hard.modules
     assert hard.course_length != easy.course_length
 
@@ -842,6 +852,7 @@ def test_curriculum_promotes_on_reliable_full_runs():
 
     cfg = tasks.parkour_cfg()
     cfg.terrain.curriculum = True
+    cfg.terrain.per_skill_difficulty = False  # the one course level this tests
     env = ParkourEnv(cfg)
     try:
         env.reset(seed=0)
@@ -878,6 +889,7 @@ def test_curriculum_respects_difficulty_bounds(cfg_factory, difficulty, completi
     assert cfg.terrain.curriculum
     assert cfg.terrain.difficulty_range == (0.0, 1.0)
     cfg.terrain.difficulty = difficulty
+    cfg.terrain.per_skill_difficulty = False
     env = ParkourEnv(cfg)
     try:
         for _ in range(cfg.terrain.curriculum_window):
@@ -893,7 +905,9 @@ def test_curriculum_respects_difficulty_bounds(cfg_factory, difficulty, completi
 def test_curriculum_rejects_failed_or_partial_start_finishes(reason, start_index):
     from g1_parkour.env import ParkourEnv
 
-    env = ParkourEnv(tasks.parkour_cfg())
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.per_skill_difficulty = False
+    env = ParkourEnv(cfg)
     try:
         env.reset(seed=0)
         start = env._difficulty
@@ -1722,6 +1736,7 @@ def test_timeout_updates_curriculum_and_reports_episode_terms():
     cfg = tasks.parkour_cfg()
     cfg.episode_length_s = 0.015
     cfg.terrain.curriculum_window = 1
+    cfg.terrain.per_skill_difficulty = False
     env = ParkourEnv(cfg)
     try:
         env.reset(seed=0)
@@ -2076,7 +2091,7 @@ def test_training_saves_checkpoints_every_ten_minutes(monkeypatch, tmp_path):
     callback = train.ProgressCallback(tmp_path, None, eval_every=1000)
     callback.model = SimpleNamespace(
         num_timesteps=5000, save=lambda path: saved.append(Path(path).name),
-        get_env=lambda: SimpleNamespace(get_attr=lambda name: [0.15, 0.25]),
+        get_env=lambda: SimpleNamespace(env_method=lambda name, *args, **kwargs: [0.15, 0.25]),
         logger=SimpleNamespace(dump=lambda **kwargs: None),
     )
     callback.locals = {"dones": [], "infos": []}
@@ -2118,7 +2133,7 @@ def test_training_evaluations_do_not_save_models(monkeypatch, tmp_path):
         num_timesteps=0, logger=SimpleNamespace(
             record=lambda *args: None, dump=lambda step: flushed_steps.append(step),
         ),
-        get_env=lambda: SimpleNamespace(get_attr=lambda name: [0.0]),
+        get_env=lambda: SimpleNamespace(env_method=lambda name, *args, **kwargs: [0.0]),
     )
     callback.locals = {"dones": [], "infos": []}
     callback._on_training_start()
@@ -2144,7 +2159,7 @@ def test_evaluation_follows_training_difficulty(monkeypatch, tmp_path):
     model = SimpleNamespace(
         num_timesteps=0,
         logger=SimpleNamespace(record=lambda *args: None, dump=lambda step: None),
-        get_env=lambda: SimpleNamespace(get_attr=lambda name: [0.2, 0.3, 0.3, 0.35]),
+        get_env=lambda: SimpleNamespace(env_method=lambda name, *args, **kwargs: [0.2, 0.3, 0.3, 0.35]),
     )
     callback = train.ProgressCallback(tmp_path, eval_env, eval_every=1)
     callback.model = model
@@ -2192,7 +2207,8 @@ def test_short_training_saves_final_or_interrupted(monkeypatch, tmp_path, interr
     from scripts import train
 
     cfg = tasks.flat_cfg()
-    fake_env = SimpleNamespace(get_attr=lambda name: [cfg] if name == "cfg" else [0.15], close=lambda: None,
+    fake_env = SimpleNamespace(get_attr=lambda name: [cfg], env_method=lambda name, *args, **kwargs: [0.15],
+                               close=lambda: None,
                                observation_mirror=lambda: "observation mirror",
                                action_mirror=lambda: "action mirror")
     saved = []
@@ -2275,3 +2291,233 @@ def test_rebuilt_world_renders_through_the_same_viewer():
         np.testing.assert_array_equal(frame, fresh.render())
     finally:
         fresh.close()
+
+
+def test_tunnel_clearance_stops_at_1_25_m():
+    from g1_parkour.terrain.parkour import Cursor, mod_tunnel
+
+    bar = next(b for b in mod_tunnel(np.random.default_rng(0), 1.0, Cursor()).boxes if b.ceiling)
+    assert bar.pos[2] - bar.size[2] == pytest.approx(1.25)
+
+
+def test_height_termination_relaxes_under_a_ceiling_and_shortly_after():
+    import mujoco
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": ("tunnel",)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = 1.0
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        bar = next(b for b in env.terrain.boxes if b.ceiling)
+        normal = env.robot.healthy_height_range[0] * cfg.termination.bad_height_scale
+        relaxed = env.robot.healthy_height_range[0] * cfg.termination.ceiling_bad_height_scale
+        env.data.qpos[0] = bar.pos[0] - 2.0  # the bar out of the upward rays' reach
+        mujoco.mj_forward(env.model, env.data)
+        assert env._update_height_floor(0.0) == pytest.approx(normal)
+        env.data.qpos[0] = bar.pos[0]
+        mujoco.mj_forward(env.model, env.data)
+        assert env._update_height_floor(0.0) == pytest.approx(relaxed)
+        env.data.qpos[0] = bar.pos[0] + 2.0  # past it: relaxed a little longer, to stand back up
+        mujoco.mj_forward(env.model, env.data)
+        floors = [env._update_height_floor(0.0) for _ in range(cfg.termination.ceiling_relief_steps + 2)]
+        assert floors[0] == pytest.approx(relaxed) and floors[-1] == pytest.approx(normal)
+        # A crouch between the two floors ends the episode only away from the bar.
+        env.data.qpos[0] = bar.pos[0]
+        env.data.qpos[2] = (normal + relaxed) / 2.0
+        mujoco.mj_forward(env.model, env.data)
+        env._update_height_floor(0.0)
+        env._evaluate(np.zeros(env.model.nu), 0.0, False)
+        assert env._bad_height_steps == 0
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("cfg_factory", [tasks.flat_cfg, tasks.rough_cfg])
+def test_stages_without_ceilings_keep_one_height_floor(cfg_factory):
+    assert cfg_factory().termination.ceiling_bad_height_scale is None
+
+
+
+@pytest.mark.parametrize("difficulty", [0.0, 0.25, 0.5, 0.75, 1.0])
+def test_long_gaps_land_lower_the_longer_they_are(difficulty):
+    from g1_parkour.terrain.parkour import Cursor, mod_gap
+
+    offsets = []
+    for seed in range(60):
+        cursor = Cursor(x=5.0, z=1.0)
+        landing = mod_gap(np.random.default_rng(seed), difficulty, cursor).boxes[0]
+        offsets.append(landing.top_z - 1.0)
+    if difficulty >= 0.5:  # never higher; the longer the gap the lower, at most 0.35 m down
+        t = (difficulty - 0.5) / 0.5
+        assert min(offsets) >= -(0.075 + 0.275 * t) - 1e-9
+        assert max(offsets) <= -0.2 * t + 1e-9
+    else:
+        assert min(offsets) >= -0.15 * difficulty - 1e-9
+        assert max(offsets) <= 0.15 * difficulty * (1 - 2 * difficulty) + 1e-9
+    # Above the ground scan's -0.5 m clip, 0.4 m below the floor: a landing, not a pit.
+    assert min(offsets) >= -0.35 - 1e-9
+
+
+def _one_module_env(skill, difficulty=1.0):
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": (skill,)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = difficulty
+    cfg.events.reset_yaw_range = 0.0
+    cfg.events.reset_noise_scale = 0.0
+    return ParkourEnv(cfg)
+
+
+def _lift_right_foot(env, x):
+    """Stand at ``x`` with the right knee raised high, as in a high swing; refresh the scan."""
+    import mujoco
+
+    env.data.qpos[0] = x
+    env.data.qpos[2] += 1.0
+    env.data.qpos[env.model.jnt_qposadr[env.model.joint("right_hip_y").id]] = np.radians(-90.0)
+    env.data.qpos[env.model.jnt_qposadr[env.model.joint("right_knee").id]] = np.radians(-90.0)
+    mujoco.mj_forward(env.model, env.data)
+    env._settle_feet_on_ground()  # leaves the standing foot 1 cm up: plant it
+    env.data.qpos[2] -= 0.012
+    mujoco.mj_forward(env.model, env.data)
+    env._feet_in_contact = env._foot_contacts()
+    env._compute_observation()
+
+
+def test_feet_clearance_pays_a_lifted_swing_foot_before_a_hurdle():
+    env = _one_module_env("hurdle")
+    try:
+        env.reset(seed=0)
+        hurdle = next(b for b in env.terrain.boxes if b.name.startswith("hurdle_") and "run" not in b.name)
+        _lift_right_foot(env, hurdle.pos[0] - 0.6)  # the raised foot reaches 0.38 m ahead
+        right = env._foot_body_ids.index(env.model.body("right_foot").id)
+        assert not env._feet_in_contact[right] and env._feet_in_contact[1 - right]
+        assert env._obstacle_ahead(0.0) == pytest.approx(hurdle.top_z, abs=1e-6)
+        paid = env._feet_clearance(0.0, forward_speed=1.0)
+        assert 0.0 < paid <= 1.0  # one swing foot, at most its full share
+        assert env._feet_clearance(0.0, forward_speed=0.0) == 0.0  # lifting a foot in place pays nothing
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("skill, difficulty", [("run", 1.0), ("rubble", 0.0)])
+def test_feet_clearance_pays_nothing_without_a_tall_obstacle_ahead(skill, difficulty):
+    env = _one_module_env(skill, difficulty)
+    try:
+        env.reset(seed=0)
+        # The same high knee on flat ground, or among rubble lower than 10 cm: no obstacle, no pay.
+        start = next(b for b in env.terrain.boxes if b.name.startswith(f"{skill}_run") or b.name.startswith("run_"))
+        _lift_right_foot(env, start.pos[0])
+        assert env._obstacle_ahead(0.0) < env.cfg.reward.feet_clearance_min_obstacle
+        assert env._feet_clearance(0.0, forward_speed=1.0) == 0.0
+    finally:
+        env.close()
+
+
+def test_feet_clearance_is_in_every_stage_and_off_when_not_moving():
+    from g1_parkour.mdp.rewards import RewardCfg, terms
+
+    for factory in (tasks.flat_cfg, tasks.rough_cfg, tasks.parkour_cfg):
+        assert factory().reward.feet_clearance == pytest.approx(0.5)
+    common = dict(dt=0.015, progress=0.0, heading_alignment=1.0, upright=1.0, height_error=0.0, lateral_speed=0.0,
+                  ang_vel=np.zeros(3), action=np.zeros(2), prev_action=np.zeros(2), torque_power=0.0,
+                  joint_limit_violation=0.0, waypoints_reached=0, reached_goal=False, fell=False, feet_clearance=1.0)
+    cfg = RewardCfg(feet_clearance=0.5)
+    assert terms(cfg, target_speed=1.0, **common)["feet_clearance"] == pytest.approx(0.5)
+    assert "feet_clearance" not in terms(cfg, target_speed=0.0, **common)
+
+
+def test_leg_torque_ceilings_rise_without_stiffer_joints():
+    from g1_parkour.env import ParkourEnv
+
+    env = ParkourEnv(tasks.flat_cfg())
+    try:
+        model = env.model
+        scale = env.robot.torque_ceiling_scale
+        legs, arms = {"hip_x", "hip_y", "hip_z", "knee"}, {"shoulder1", "shoulder2", "elbow"}
+        assert set(scale) == legs | arms
+        assert len({scale[k] for k in legs}) == 1 and len({scale[k] for k in arms}) == 1  # each limb evenly
+        for name, old_limit in (("right_hip_y", 120.0), ("left_knee", 80.0), ("right_hip_x", 40.0),
+                                ("left_shoulder1", 10.0), ("right_elbow", 10.0)):
+            actuator = model.actuator(name).id
+            factor = scale[name.split("_", 1)[1]]
+            assert model.actuator_gear[actuator, 0] * model.actuator_ctrlrange[actuator, 1] == pytest.approx(factor * old_limit)
+            assert env._pd_kp[actuator] == pytest.approx(env.robot.pd_stiffness_per_torque * old_limit)
+        for name, limit in (("abdomen_y", 40.0), ("abdomen_x", 40.0)):  # the torso as it was
+            actuator = model.actuator(name).id
+            assert model.actuator_gear[actuator, 0] * model.actuator_ctrlrange[actuator, 1] == pytest.approx(limit)
+        assert env.observation_mirror() is not None and env.action_mirror() is not None  # still symmetric
+    finally:
+        env.close()
+
+
+
+@pytest.mark.parametrize("difficulty, depth", [(0.0, 0.24), (0.5, 0.62), (1.0, 1.0)])
+def test_tunnel_covered_stretch_grows_with_difficulty(difficulty, depth):
+    from g1_parkour.terrain.parkour import Cursor, mod_tunnel
+
+    bar = next(b for b in mod_tunnel(np.random.default_rng(0), difficulty, Cursor()).boxes if b.ceiling)
+    assert 2 * bar.size[0] == pytest.approx(depth)
+
+
+
+@pytest.mark.parametrize("difficulty, boost", [(0.0, 0.5), (0.5, 0.75), (1.0, 1.0)])
+def test_run_waypoints_ask_for_a_sprint_on_top_of_the_sampled_speed(difficulty, boost):
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 2, "skills": ("run", "hurdle"),
+                          "skill_weights": {"run": 1.0, "hurdle": 1.0}}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = difficulty
+    env = ParkourEnv(cfg)
+    try:
+        for seed in range(6):
+            env.reset(seed=seed)
+            low, high = cfg.command_speed_range
+            boosts = env.terrain.waypoint_speed_boost
+            assert len(boosts) == len(env._waypoint_speeds)
+            assert set(np.round(boosts, 6)) <= {0.0, round(boost, 6)}
+            sprint = boosts > 0
+            assert np.all(env._waypoint_speeds[sprint] >= low + boost - 1e-9)
+            assert np.all(env._waypoint_speeds[sprint] <= high + boost + 1e-9)
+            assert np.all(env._waypoint_speeds[~sprint] <= high + 1e-9)
+            names = env.terrain.modules
+            assert sprint.any() == ("run" in names)
+    finally:
+        env.close()
+
+
+def test_the_sprint_is_in_the_speed_command_the_policy_sees_and_is_rewarded_on():
+    import mujoco
+    from g1_parkour.env import ParkourEnv
+
+    cfg = tasks.parkour_cfg()
+    cfg.terrain.params = {"num_modules": 1, "skills": ("run",)}
+    cfg.terrain.curriculum = False
+    cfg.terrain.difficulty = 1.0
+    env = ParkourEnv(cfg)
+    try:
+        env.reset(seed=0)
+        sprint = int(np.flatnonzero(env.terrain.waypoint_speed_boost > 0)[0])
+        env._target_index = sprint
+        obs = env._compute_observation()
+        index = 61 + 3 * cfg.waypoint_lookahead  # proprioception (61), waypoint vectors, then speed
+        assert obs[index] == pytest.approx(env.command_speed)
+        assert env.command_speed >= cfg.command_speed_range[0] + 1.0 - 1e-9
+        # Tracking pays most for matching the boosted command, and progress is capped at it.
+        env.data.qvel[0] = env.command_speed
+        mujoco.mj_forward(env.model, env.data)
+        _, fast_terms, *_ = env._evaluate(np.zeros(env.model.nu), env.command_speed * env.dt, False)
+        env.data.qvel[0] = cfg.command_speed_range[0]
+        mujoco.mj_forward(env.model, env.data)
+        _, slow_terms, *_ = env._evaluate(np.zeros(env.model.nu), cfg.command_speed_range[0] * env.dt, False)
+        assert fast_terms["velocity_tracking"] > slow_terms["velocity_tracking"]
+        assert fast_terms["progress"] > slow_terms["progress"]
+    finally:
+        env.close()

@@ -76,8 +76,11 @@ def partner_name(name: str) -> str:
     return name
 
 
-def joint_mirror(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
+def joint_mirror(model: mujoco.MjModel, joints: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Partner joint id and sign for every joint: mirrored angle of ``j`` = sign[j] * angle of partner[j].
+
+    Only ``joints`` (every hinge by default) are paired; others, such as a terrain module's
+    barrel or seesaw hinge, keep themselves as partner with sign 1.
 
     Joint axes are compared in the world at the model's reference pose (zero joint angles,
     upright, zero yaw), where the body frame equals the world frame. A rotation by ``t`` about
@@ -95,8 +98,9 @@ def joint_mirror(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
 
     partner = np.arange(model.njnt)
     sign = np.ones(model.njnt)
+    paired = set(range(model.njnt) if joints is None else joints)
     for joint in range(model.njnt):
-        if model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_HINGE:
+        if model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_HINGE or joint not in paired:
             continue
         name = model.joint(joint).name
         other = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, partner_name(name))
@@ -113,12 +117,15 @@ def joint_mirror(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
     return partner, sign
 
 
-def hinge_mirror(model: mujoco.MjModel) -> Mirror:
-    """Mirror of the joint block of the observation (``qpos[7:]`` and ``qvel[6:]``)."""
-    hinges = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
-    if model.nq - 7 != len(hinges) or model.nv - 6 != len(hinges):
-        raise ValueError("joint mirroring expects one free root joint followed by hinge joints")
-    partner, sign = joint_mirror(model)
+def hinge_mirror(model: mujoco.MjModel, joints: list[int] | None = None) -> Mirror:
+    """Mirror of the joint block of the observation: the robot's ``joints`` (all the model's
+    joints but its free root by default), which must all be hinges."""
+    if joints is None:
+        joints = [j for j in range(model.njnt) if model.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
+    hinges = list(joints)
+    if any(model.jnt_type[j] != mujoco.mjtJoint.mjJNT_HINGE for j in hinges):
+        raise ValueError("joint mirroring expects the robot's joints below its free root to be hinges")
+    partner, sign = joint_mirror(model, hinges)
     slot = {joint: index for index, joint in enumerate(hinges)}
     return Mirror([slot[partner[j]] for j in hinges], [sign[j] for j in hinges])
 
@@ -129,8 +136,8 @@ def actuator_mirror(model: mujoco.MjModel) -> Mirror:
     Raises unless partner actuators have equal gear and control ranges symmetric about zero,
     because only then does a signed swap of actions give the mirrored joint commands.
     """
-    partner, sign = joint_mirror(model)
     joints = model.actuator_trnid[:, 0]
+    partner, sign = joint_mirror(model, [int(joint) for joint in joints])
     actuator_of = {int(joint): index for index, joint in enumerate(joints)}
     perm = []
     for index, joint in enumerate(joints):

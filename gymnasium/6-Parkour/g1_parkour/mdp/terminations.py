@@ -17,6 +17,24 @@ class TerminationCfg:
     bad_height_scale: float = 1.0
     """Multiplier on the healthy lower bound; values below 1 tolerate deeper crouches
     and stumble-recoveries before terminating (used by the play script)."""
+    ceiling_bad_height_scale: float | None = None
+    """Replaces ``bad_height_scale`` while the upward rays see a ceiling, and for
+    ``ceiling_relief_steps`` after, so the robot may crouch low under a tunnel bar and stand
+    back up. It also sets the support gate on the progress reward. None keeps one scale."""
+    ceiling_relief_steps: int = 60
+    """Steps (0.9 s) the relaxed floor lasts after the upward rays last saw a ceiling. At 30,
+    procedural_0.0.5 fell at d = 0.9 tunnel exits 50 steps after (30 plus the 20-step grace),
+    still rising from its crouch: the rays reach 0.4 m ahead, so they clear the roof first."""
+    crawl_ceiling_clearance: float = 1.22
+    """A ceiling at most this high above the floor (an air vent's 1.2 m or lower, not a
+    tunnel's 1.25 m or more) allows a crawl: ``crawl_bad_height_scale`` and ``crawl_orientation_limit`` apply
+    while the upward rays see it and for ``ceiling_relief_steps`` after, so the robot can
+    stand back up."""
+    crawl_bad_height_scale: float | None = None
+    """Replaces the height scale under a crawl-height ceiling; None leaves the ceiling one."""
+    crawl_orientation_limit: float | None = None
+    """Replaces ``orientation_limit`` under a crawl-height ceiling (on hands and knees the torso
+    is about horizontal, upright 0); None leaves it."""
     bad_orientation: bool = True
     recovery_grace_steps: int = 0
     """Consecutive unhealthy steps tolerated before a height or tilt termination."""
@@ -45,14 +63,23 @@ def check(
     stall_counter: int,
     bad_height_steps: int = 1,
     bad_orientation_steps: int = 1,
+    height_floor: float | None = None,
+    orientation_limit: float | None = None,
 ) -> tuple[bool, str]:
+    """``height_floor`` overrides the lowest healthy height (the environment's, relaxed under
+    a ceiling); by default it is ``healthy_height_range[0] * bad_height_scale``.
+    ``orientation_limit`` likewise overrides ``cfg.orientation_limit`` (relaxed for a crawl)."""
+    if orientation_limit is None:
+        orientation_limit = cfg.orientation_limit
+    if height_floor is None:
+        height_floor = healthy_height_range[0] * cfg.bad_height_scale
     if (
         cfg.bad_height
-        and height_above_terrain < healthy_height_range[0] * cfg.bad_height_scale
+        and height_above_terrain < height_floor
         and bad_height_steps > cfg.recovery_grace_steps
     ):
         return True, "bad_height"
-    if (cfg.bad_orientation and upright < cfg.orientation_limit
+    if (cfg.bad_orientation and upright < orientation_limit
             and bad_orientation_steps > cfg.recovery_grace_steps):
         return True, "bad_orientation"
     if cfg.out_of_bounds and (

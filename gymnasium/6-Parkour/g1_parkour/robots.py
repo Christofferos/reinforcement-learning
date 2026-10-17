@@ -48,6 +48,10 @@ class RobotSpec:
     """Position-control kp per actuator = this factor x the actuator's torque limit (Nm/rad)."""
     pd_damping_ratio: float = 0.05
     """Position-control kd = this ratio x kp (Nm s/rad)."""
+    torque_ceiling_scale: dict[str, float] = field(default_factory=dict)
+    """Multiplier on the torque limit of every actuator whose name ends with a key, applied
+    after the position-control gains are set from the unscaled limit: the joints are exactly as
+    stiff as before and push the same until they reach the old limit, and can push harder past it."""
 
 
 # --------------------------------------------------------------------------------------
@@ -70,7 +74,6 @@ _HUMANOID_BODY = """
         <camera name="side_view" mode="trackcom" pos="1 -3 0.5" xyaxes="1 0 0 0 0.4 0.9"/>
         <camera name="chase_view" mode="trackcom" pos="-3 0 0.5" xyaxes="0 -1 0 0.342 0 0.940"/>
         <camera name="front_view" mode="trackcom" pos="2.5 0 0.25" xyaxes="0 1 0 -0.342 0 0.940"/>
-        <camera name="egocentric" mode="fixed" pos="0.2 0 0.15" xyaxes="0 -1 0 0.3 0 0.95"/>
         <joint armature="0" damping="0" limited="false" name="root" pos="0 0 0" stiffness="0" type="free"/>
         <geom fromto="0 -.07 0 0 .07 0" name="torso1" size="0.07" type="capsule" material="material_shirt"/>
         <geom name="head" pos="0 0 .19" size=".09" type="sphere" material="lucas_material" quat="0.707 0 0.507 0"/>
@@ -184,6 +187,20 @@ HUMANOID = RobotSpec(
     healthy_height_range=(0.95, 2.2),
     foot_bodies=("left_foot", "right_foot"),
     shin_bodies=("left_shin", "right_shin"),
+    # Stronger legs, raised a step per training run towards 2x: as modelled the best standing
+    # jump rose 7 cm (an untrained adult's is 30-40 cm), procedural_0.0.4 ran at its hip and knee
+    # limits on a quarter of all steps even on flat ground, and climbs stopped at about 0.33 m.
+    # Its maximum-effort moves overshoot with much more torque at once: on full d = 0.65 courses
+    # it scored 60% at 1x, 56% at 1.25x, 42% at 1.5x and 31% at 2x. So 1.25x for procedural_0.0.5,
+    # then 2x from procedural_0.0.6 (0.0.5 scored 65% at 1.25x, 60% at 1.5x and 48% at 2x).
+    # Arms (10 Nm per joint, for pushing up off the ground and leaning on the hands in a crawl):
+    # 1.5x from procedural_0.0.7, then 2x, then 3x. procedural_0.0.6 had an arm at its limit on
+    # 96% of steps, swinging them at full force, and on full d = 0.6 courses scored 58% at 1x,
+    # 46% at 1.5x, 27% at 2x and 29% at 3x: stronger arms make the same swings overshoot.
+    torque_ceiling_scale={
+        "hip_x": 2.0, "hip_z": 2.0, "hip_y": 2.0, "knee": 2.0,
+        "shoulder1": 1.5, "shoulder2": 1.5, "elbow": 1.5,
+    },
     # Flexed hips/knees chosen so the whole-body CoM sits over the feet (the model has no
     # ankles, so balance must come from the hips); also keeps qpos inside the knee range.
     default_joint_pos={
